@@ -13,6 +13,8 @@ if __name__ == "__main__":
     print("🚀 Inicializando Pipeline de Detecção de Anomalias (SSP-DF)...")
     try:
         run_experiment()
+        # Organiza e compila relatórios após o pipeline
+        import src.organizacao_arquivos
     except KeyboardInterrupt:
         print("\n🛑 Execução interrompida pelo usuário.")
     except Exception as e:

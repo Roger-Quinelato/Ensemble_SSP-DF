@@ -1,3 +1,9 @@
+"""
+Testes para o módulo de avaliação do projeto Ensemble_SSP-DF.
+
+Valida funções de cálculo de métricas, avaliação de modelos e geração de resultados.
+Garante que as métricas e avaliações estão corretas e robustas para diferentes cenários de entrada.
+"""
 import pytest
 import numpy as np
 import pandas as pd

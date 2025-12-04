@@ -1,3 +1,9 @@
+"""
+Testes para o módulo DataProcessor do projeto Ensemble_SSP-DF.
+
+Valida funcionalidades de processamento de dados, incluindo limpeza, padronização, engenharia de features e tratamento de datas.
+Garante que o DataProcessor está funcionando conforme esperado e que as principais funções retornam resultados corretos.
+"""
 import pytest
 import pandas as pd
 from src.data_processor import DataProcessor

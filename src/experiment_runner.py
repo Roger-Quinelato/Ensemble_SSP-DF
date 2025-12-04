@@ -77,13 +77,10 @@ def run_experiment():
     # Profiling Rápido e Informações Gerais
     dias = df[map_cols['timestamp']].dt.date.nunique()
     meses = df[map_cols['timestamp']].dt.to_period('M').nunique()
-    local_mais_fluxo = (
-        df.groupby([map_cols['latitude'], map_cols['longitude']])[map_cols['placa']]
-        .count()
-        .sort_values(ascending=False)
-        .reset_index()
-        .iloc[0]
-    )
+    grouped = df.groupby([map_cols['latitude'], map_cols['longitude']])[map_cols['placa']].count()
+    if hasattr(grouped, 'compute'):
+        grouped = grouped.compute()
+    local_mais_fluxo = grouped.sort_values(ascending=False).reset_index().iloc[0]
     stats = {
         'total_veiculos': int(df[map_cols['placa']].nunique()),
         'periodo': f"{df[map_cols['timestamp']].min()} a {df[map_cols['timestamp']].max()}",
@@ -232,7 +229,7 @@ def run_experiment():
     
     # Exportação com Dask
     if hasattr(df, 'to_parquet'):
-        df.to_parquet('outputs/master_table/resultado_final.parquet', write_index=False)
+        df.to_parquet('outputs/master_table/resultado_final.parquet', index=False)
     else:
         pd.DataFrame(df).to_parquet('outputs/master_table/resultado_final.parquet', index=False)
     # Exportar métricas agrupadas por família de modelo
@@ -252,9 +249,21 @@ def run_experiment():
     df_lof = df[id_cols + [col for col in df.columns if col.startswith('LOF')]]
     df_lstm = df[id_cols + [col for col in df.columns if col.startswith('LSTM')]]
     if hasattr(df_iso, 'to_csv'):
-        df_iso.to_csv('outputs/metrics/iso_results.csv', single_file=True, index=False)
-        df_lof.to_csv('outputs/metrics/lof_results.csv', single_file=True, index=False)
-        df_lstm.to_csv('outputs/metrics/lstm_results.csv', single_file=True, index=False)
+        # Salva CSV de forma compatível com Dask e pandas
+        if hasattr(df_iso, 'to_csv') and 'single_file' in df_iso.to_csv.__code__.co_varnames:
+            df_iso.to_csv('outputs/metrics/iso_results.csv', single_file=True, index=False)
+        else:
+            df_iso.to_csv('outputs/metrics/iso_results.csv', index=False)
+        # Salva CSV de forma compatível com Dask e pandas
+        if hasattr(df_lof, 'to_csv') and 'single_file' in df_lof.to_csv.__code__.co_varnames:
+            df_lof.to_csv('outputs/metrics/lof_results.csv', single_file=True, index=False)
+        else:
+            df_lof.to_csv('outputs/metrics/lof_results.csv', index=False)
+        # Salva CSV de forma compatível com Dask e pandas
+        if hasattr(df_lstm, 'to_csv') and 'single_file' in df_lstm.to_csv.__code__.co_varnames:
+            df_lstm.to_csv('outputs/metrics/lstm_results.csv', single_file=True, index=False)
+        else:
+            df_lstm.to_csv('outputs/metrics/lstm_results.csv', index=False)
     else:
         pd.DataFrame(df_iso).to_csv('outputs/metrics/iso_results.csv', index=False)
         pd.DataFrame(df_lof).to_csv('outputs/metrics/lof_results.csv', index=False)
@@ -264,7 +273,11 @@ def run_experiment():
     if score_columns_audit:
         describe_df = df[score_columns_audit].describe().T
         if hasattr(describe_df, 'to_csv'):
-            describe_df.to_csv('outputs/metrics/comparativo_completo.csv', single_file=True)
+            # Salva CSV de forma compatível com Dask e pandas
+            if hasattr(describe_df, 'to_csv') and 'single_file' in describe_df.to_csv.__code__.co_varnames:
+                describe_df.to_csv('outputs/metrics/comparativo_completo.csv', single_file=True)
+            else:
+                describe_df.to_csv('outputs/metrics/comparativo_completo.csv')
         else:
             pd.DataFrame(describe_df).to_csv('outputs/metrics/comparativo_completo.csv')
         print("   ✅ Comparativo salvo: outputs/metrics/comparativo_completo.csv")
@@ -278,7 +291,11 @@ def run_experiment():
                     strat = parts[3]
                     group_stats = df.groupby([f'{col}'])[col].describe()
                     if hasattr(group_stats, 'to_csv'):
-                        group_stats.to_csv(f'outputs/metrics/describe_LOF_{strat}_k{k}.csv', single_file=True)
+                        # Salva CSV de forma compatível com Dask e pandas
+                        if hasattr(group_stats, 'to_csv') and 'single_file' in group_stats.to_csv.__code__.co_varnames:
+                            group_stats.to_csv(f'outputs/metrics/describe_LOF_{strat}_k{k}.csv', single_file=True)
+                        else:
+                            group_stats.to_csv(f'outputs/metrics/describe_LOF_{strat}_k{k}.csv')
                     else:
                         pd.DataFrame(group_stats).to_csv(f'outputs/metrics/describe_LOF_{strat}_k{k}.csv')
         # Estatísticas agrupadas para LSTM-AE
@@ -287,7 +304,11 @@ def run_experiment():
             for col in lstm_cols:
                 group_stats = df.groupby([col])[col].describe()
                 if hasattr(group_stats, 'to_csv'):
-                    group_stats.to_csv(f'outputs/metrics/describe_{col}.csv', single_file=True)
+                    # Salva CSV de forma compatível com Dask e pandas
+                    if hasattr(group_stats, 'to_csv') and 'single_file' in group_stats.to_csv.__code__.co_varnames:
+                        group_stats.to_csv(f'outputs/metrics/describe_{col}.csv', single_file=True)
+                    else:
+                        group_stats.to_csv(f'outputs/metrics/describe_{col}.csv')
                 else:
                     pd.DataFrame(group_stats).to_csv(f'outputs/metrics/describe_{col}.csv')
     print("\n✅ EXPERIMENTO COMBINATÓRIO FINALIZADO!")

@@ -51,7 +51,15 @@ class DataProcessor:
             if col in df.columns:
                 df[col] = df[col].astype(float)
         df = df.dropna(subset=[self.map_cols['timestamp'], self.map_cols['placa']])
-        df = df.sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
+        # Se for Dask DataFrame, compute antes de ordenar
+        if hasattr(df, 'compute'):
+            try:
+                df = df.compute().sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
+            except Exception:
+                # Se já for pandas, apenas ordena
+                df = df.sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
+        else:
+            df = df.sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
         return df
 
     def _haversine_vectorized(self, lat1, lon1, lat2, lon2):
@@ -83,8 +91,12 @@ class DataProcessor:
         # 1. Features Temporais (Seno/Cosseno para ciclicidade)
         df['hora'] = df['timestamp'].dt.hour
         df['dia_sem'] = df['timestamp'].dt.dayofweek
-        df['hora_sin'] = df['hora'].map_partitions(lambda x: np.sin(2 * np.pi * x / 24))
-        df['hora_cos'] = df['hora'].map_partitions(lambda x: np.cos(2 * np.pi * x / 24))
+        if hasattr(df['hora'], 'map_partitions'):
+            df['hora_sin'] = df['hora'].map_partitions(lambda x: np.sin(2 * np.pi * x / 24))
+            df['hora_cos'] = df['hora'].map_partitions(lambda x: np.cos(2 * np.pi * x / 24))
+        else:
+            df['hora_sin'] = np.sin(2 * np.pi * df['hora'] / 24)
+            df['hora_cos'] = np.cos(2 * np.pi * df['hora'] / 24)
         self.features_to_use.extend(['hora_sin', 'hora_cos', 'dia_sem'])
 
         # 2. Features de Contexto (Feriados)
@@ -96,7 +108,10 @@ class DataProcessor:
                 except Exception:
                     return 0
             return x.apply(is_holiday)
-        df['eh_feriado'] = df['timestamp'].dt.date.map_partitions(feriado_func, meta=('eh_feriado', 'int64'))
+        if hasattr(df['timestamp'].dt.date, 'map_partitions'):
+            df['eh_feriado'] = df['timestamp'].dt.date.map_partitions(feriado_func, meta=('eh_feriado', 'int64'))
+        else:
+            df['eh_feriado'] = df['timestamp'].dt.date.apply(lambda d: 1 if pd.to_datetime(d, errors='coerce') in br_holidays else 0)
         self.features_to_use.append('eh_feriado')
 
         # 3. Features Espaciais (Velocidade/Aceleração)

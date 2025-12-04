@@ -71,6 +71,15 @@ metrics_df = pd.DataFrame({
 metrics_df.to_csv(os.path.join(REPORTS_DIR, 'DescricaoInicial_BaseDados.csv'), index=False)
 
 # Salva estatísticas descritivas em outro CSV (opcional)
-df_raw.describe(include='all').to_csv(os.path.join(REPORTS_DIR, 'Estatisticas_DescricaoInicial_BaseDados.csv'))
+
+# Estatísticas descritivas para colunas categóricas (object, category)
+categorical_cols = df_raw.select_dtypes(include=['object', 'category']).columns
+if len(categorical_cols) > 0:
+    df_raw[categorical_cols].describe(include='all').to_csv(os.path.join(REPORTS_DIR, 'Estatisticas_Descricao_Categoricas.csv'))
+
+# Estatísticas descritivas para colunas numéricas
+numeric_cols = df_raw.select_dtypes(include=['number']).columns
+if len(numeric_cols) > 0:
+    df_raw[numeric_cols].describe().to_csv(os.path.join(REPORTS_DIR, 'Estatisticas_Descricao_Numericas.csv'))
 
 print('Relatórios compilados e arquivos organizados em outputs/reports/')

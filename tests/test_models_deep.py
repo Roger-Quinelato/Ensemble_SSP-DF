@@ -1,3 +1,9 @@
+"""
+Testes para o módulo de modelos deep learning do projeto Ensemble_SSP-DF.
+
+Valida a implementação dos modelos de aprendizado profundo, funções de treinamento, predição e integração com o pipeline.
+Garante que os modelos deep learning funcionam corretamente e retornam resultados esperados.
+"""
 import pytest
 import numpy as np
 from src.models_deep import LSTMPipeline

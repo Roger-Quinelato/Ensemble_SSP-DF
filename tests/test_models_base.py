@@ -1,3 +1,9 @@
+"""
+Testes para o módulo de modelos base do projeto Ensemble_SSP-DF.
+
+Valida a implementação dos modelos tradicionais, funções de treinamento, predição e integração com o pipeline.
+Garante que os modelos base funcionam corretamente e retornam resultados esperados.
+"""
 import pytest
 import numpy as np
 from src.models_base import BaselineModels
