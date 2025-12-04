@@ -90,8 +90,13 @@ class DataProcessor:
         # 2. Features de Contexto (Feriados)
         br_holidays = holidays.BR(state='DF')
         def feriado_func(x):
-            return x.apply(lambda d: 1 if d in br_holidays else 0)
-        df['eh_feriado'] = df['timestamp'].dt.date.map_partitions(feriado_func)
+            def is_holiday(d):
+                try:
+                    return 1 if pd.to_datetime(d, errors='coerce') in br_holidays else 0
+                except Exception:
+                    return 0
+            return x.apply(is_holiday)
+        df['eh_feriado'] = df['timestamp'].dt.date.map_partitions(feriado_func, meta=('eh_feriado', 'int64'))
         self.features_to_use.append('eh_feriado')
 
         # 3. Features Espaciais (Velocidade/Aceleração)
