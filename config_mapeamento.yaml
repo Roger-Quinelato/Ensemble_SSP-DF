@@ -1,0 +1,21 @@
+# ==============================================================================
+# CONFIGURAÇÃO MESTRE - PIPELINE DE DETECÇÃO DE ANOMALIAS (SSP-DF)
+# BASEADO NA EVIDÊNCIA VISUAL (BD SSP-DF)
+# ==============================================================================
+
+random_state: 42
+# 1. MAPEAMENTO DE DADOS
+
+# Nome na Base SSP-DF : Nome Interno Usado no Pipeline
+mapeamento_colunas:
+  placa: "placa"    
+  timestamp: "timestamp" 
+  latitude: "latitude"
+  longitude: "longitude"
+  
+# 2. CONFIGURAÇÃO DE ENGENHARIA DE FEATURES
+parametros:
+  percentis_teste: [90, 95, 99]
+  lstm_window_size: 2
+configuracoes_gerais:
+  gap_segmentation_seconds: 1800  # 30 minutos - Diminuir para uma análise mais sensível a paradas curtas

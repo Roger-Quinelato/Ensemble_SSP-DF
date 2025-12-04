@@ -1,0 +1,20 @@
+name: sspdf-anomalias
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+    - python=3.10
+    - pandas>=1.5.0
+    - numpy=1.23.5
+    - scikit-learn>=1.3.0
+    - tensorflow-cpu=2.12.0
+    - keras=2.12.0
+    - pyyaml>=6.0
+    - joblib>=1.3.0
+    - pyarrow>=12.0.0
+    - tqdm>=4.65.0
+    - holidays
+    - dask
+    - pip
+    - pip:
+      - pytest
