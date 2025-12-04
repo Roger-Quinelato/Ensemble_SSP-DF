@@ -1,0 +1,45 @@
+Guia de Execução do Projeto Ensemble_SSP-DF
+
+1. Introdução
+Este documento orienta sobre como utilizar e executar o projeto Ensemble_SSP-DF, desenvolvido para análise e processamento de dados da SSP-DF.
+
+2. Pré-requisitos
+- Sistema Operacional: Windows
+- Python 3.8 ou superior
+- Git (opcional, para versionamento)
+- Instalar dependências:
+  a) Recomenda-se utilizar o ambiente Conda. Execute:
+     conda env create -f environment.yml
+     conda activate ensemble_ssp_df
+  b) Alternativamente, instale via pip:
+     pip install -r requirements.txt
+
+3. Estrutura de Pastas
+- src/: Código-fonte principal
+- data/input/: Dados brutos (ex: amostra_ssp.csv)
+- data/processed/: Dados processados
+- outputs/: Resultados, logs, métricas, modelos salvos, relatórios
+- tests/: Testes automatizados
+
+4. Passo a Passo para Execução
+1) Coloque o arquivo de dados em data/input/
+2) Ative o ambiente Python conforme o passo 2
+3) Execute o pipeline principal:
+   python src/main.py
+4) Os resultados serão gerados em outputs/ (logs, métricas, relatórios, modelos)
+
+5. Visualização dos Resultados
+- Relatórios: outputs/reports/
+- Métricas: outputs/metrics/
+- Modelos salvos: outputs/models_saved/
+- Logs: outputs/logs/
+
+6. Testes
+Para rodar os testes automatizados:
+   python -m unittest discover tests
+
+7. Contato
+Em caso de dúvidas, entre em contato com o responsável pelo projeto.
+
+---
+SSP-DF | Guia de Execução do Projeto Ensemble_SSP-DF
