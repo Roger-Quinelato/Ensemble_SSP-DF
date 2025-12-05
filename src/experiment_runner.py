@@ -6,7 +6,7 @@ import yaml
 import os
 import json
 import itertools
-from sklearn.preprocessing import MinMaxScaler
+from dask_ml.preprocessing import MinMaxScaler
 from .data_processor import DataProcessor
 from .models_base import BaselineModels
 from .models_deep import LSTMPipeline
@@ -102,7 +102,18 @@ def run_experiment():
         df_pd = df.compute()
     else:
         df_pd = df
-    X_scaled = scaler.fit_transform(df_pd[proc.features_to_use])
+    X_scaled = scaler.fit_transform(df[proc.features_to_use])
+    # Adiciona dimensões categóricas
+    df['hora'] = df[map_cols['timestamp']].dt.hour
+    df['dia_semana'] = df[map_cols['timestamp']].dt.day_name()
+    # Estatísticas por bins de score usando pd.qcut
+    for col_score in score_columns_audit:
+        df[f'{col_score}_bin'] = pd.qcut(df[col_score], q=10, labels=[f'Decil_{i+1}' for i in range(10)])
+        for dim in ['hora', 'dia_semana', f'{col_score}_bin']:
+            stats = df.groupby(dim)[col_score].describe()
+            filename = f'outputs/metrics/stats_{col_score}_por_{dim}.csv'
+            stats.to_csv(filename)
+            print(f"   Salvo: {filename}")
     models_base = BaselineModels(X_scaled)
     optimizer = ThresholdOptimizer(config['parametros']['percentis_teste'])
     results_summary = []
@@ -121,7 +132,12 @@ def run_experiment():
     for n_est in [100, 200]:
         tag = f"ISO_n{n_est}"
         print(f"   ↳ {tag}...")
-        _, scores, _ = models_base.train_iso(n_estimators=n_est)
+        labels, scores, model = models_base.train_iso(n_estimators=n_est)
+        # Salvar modelo Isolation Forest
+        import joblib
+        import os
+        os.makedirs('outputs/models_saved', exist_ok=True)
+        joblib.dump(model, f'outputs/models_saved/iso_n{n_est}.joblib')
         
         # Salvar Score
         df[f'{tag}_score'] = -scores
@@ -148,7 +164,12 @@ def run_experiment():
                 # apenas para viabilizar o treino do LOF Novelty (exigência do algoritmo)
                 mask_input = iso_masks_registry['ISO_n100'] if strat == 'novelty' else None
                 
-                _, scores = models_base.train_lof(k_neighbors=k, strategy=strat, mask_inliers=mask_input)
+                labels, scores, model = models_base.train_lof(k_neighbors=k, strategy=strat, mask_inliers=mask_input)
+                # Salvar modelo LOF
+                import joblib
+                import os
+                os.makedirs('outputs/models_saved', exist_ok=True)
+                joblib.dump(model, f'outputs/models_saved/lof_k{k}_{strat}.joblib')
                 
                 df[f'{tag}_score'] = -scores
                 score_columns_audit.append(f'{tag}_score')
@@ -175,6 +196,7 @@ def run_experiment():
         X_data=X_scaled,
         vehicle_ids=df[map_cols['placa']].values,
         timestamps=df[map_cols['timestamp']].values,
+        original_indices=df.index.values,
         window_size=config['parametros']['lstm_window_size'],
         max_gap_seconds=gap_seconds
     )
@@ -195,9 +217,14 @@ def run_experiment():
             mask_train_uniao = iso_mask_inlier & lof_mask_inlier
             lstm_name_uniao = f"LSTM_Uniao_{iso_name}_{lof_name}"
             print(f"   ↳ Treinando {lstm_name_uniao}...")
-            mse_uniao, _ = lstm_pipe.train_evaluate(lstm_name_uniao, mask_train=mask_train_uniao, epochs=5)
-            if mse_uniao is not None:
-                df[f'{lstm_name_uniao}_score'] = pd.Series(mse_uniao).fillna(0)
+            mse_uniao, idx_uniao, model_uniao = lstm_pipe.train_evaluate(lstm_name_uniao, mask_train=mask_train_uniao, epochs=5)
+            # Salvar modelo LSTM União
+            if model_uniao is not None:
+                import os
+                os.makedirs('outputs/models_saved', exist_ok=True)
+                model_uniao.save(f'outputs/models_saved/lstm_uniao_{iso_name}_{lof_name}.h5')
+            if mse_uniao is not None and idx_uniao is not None:
+                df.loc[idx_uniao, f'{lstm_name_uniao}_score'] = mse_uniao
                 score_columns_audit.append(f'{lstm_name_uniao}_score')
                 df, metrics = optimizer.apply_dynamic_thresholds(df, f'{lstm_name_uniao}_score', lstm_name_uniao)
                 results_summary.extend(metrics)
@@ -205,21 +232,31 @@ def run_experiment():
             mask_train_inter = iso_mask_inlier | lof_mask_inlier
             lstm_name_inter = f"LSTM_Inter_{iso_name}_{lof_name}"
             print(f"   ↳ Treinando {lstm_name_inter}...")
-            mse_inter, _ = lstm_pipe.train_evaluate(lstm_name_inter, mask_train=mask_train_inter, epochs=5)
-            if mse_inter is not None:
-                df[f'{lstm_name_inter}_score'] = pd.Series(mse_inter).fillna(0)
+            mse_inter, idx_inter, model_inter = lstm_pipe.train_evaluate(lstm_name_inter, mask_train=mask_train_inter, epochs=5)
+            # Salvar modelo LSTM Interseção
+            if model_inter is not None:
+                import os
+                os.makedirs('outputs/models_saved', exist_ok=True)
+                model_inter.save(f'outputs/models_saved/lstm_inter_{iso_name}_{lof_name}.h5')
+            if mse_inter is not None and idx_inter is not None:
+                df.loc[idx_inter, f'{lstm_name_inter}_score'] = mse_inter
                 score_columns_audit.append(f'{lstm_name_inter}_score')
                 df, metrics = optimizer.apply_dynamic_thresholds(df, f'{lstm_name_inter}_score', lstm_name_inter)
                 results_summary.extend(metrics)
 
     # Treino Controle (Sujo - Sem GT)
     print(f"\n⚡ Cenário: Controle (Sem GT)")
-    mse, _ = lstm_pipe.train_evaluate("LSTM_Sujo", mask_train=None, epochs=5)
-    if mse is not None:
-         df['LSTM_Sujo_score'] = pd.Series(mse).fillna(0)
-         score_columns_audit.append('LSTM_Sujo_score')
-         df, metrics = optimizer.apply_dynamic_thresholds(df, 'LSTM_Sujo_score', 'LSTM_Sujo')
-         results_summary.extend(metrics)
+    mse_sujo, idx_sujo, model_sujo = lstm_pipe.train_evaluate("LSTM_Sujo", mask_train=None, epochs=5)
+    # Salvar modelo LSTM Sujo
+    if model_sujo is not None:
+        import os
+        os.makedirs('outputs/models_saved', exist_ok=True)
+        model_sujo.save('outputs/models_saved/lstm_sujo.h5')
+    if mse_sujo is not None and idx_sujo is not None:
+        df.loc[idx_sujo, 'LSTM_Sujo_score'] = mse_sujo
+        score_columns_audit.append('LSTM_Sujo_score')
+        df, metrics = optimizer.apply_dynamic_thresholds(df, 'LSTM_Sujo_score', 'LSTM_Sujo')
+        results_summary.extend(metrics)
 
     # ==========================================================================
     # 4. EXPORTAÇÃO

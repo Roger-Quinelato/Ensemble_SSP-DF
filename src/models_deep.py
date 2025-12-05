@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 from .logger_utils import log_execution
 
 class LSTMPipeline:
-    def __init__(self, X_data, vehicle_ids, timestamps, window_size=5, max_gap_seconds=600):
+    def __init__(self, X_data, vehicle_ids, timestamps, original_indices, window_size=5, max_gap_seconds=600):
         """
         Inicializa o pipeline LSTM para detecção de anomalias sequenciais.
         Suporta Dask DataFrame.
@@ -21,64 +21,45 @@ class LSTMPipeline:
             self.X = X_data
         self.vehicle_ids = np.array(vehicle_ids)
         self.timestamps = pd.to_datetime(timestamps).values
+        self.original_indices = np.array(original_indices)
         self.window_size = window_size
         self.max_gap_seconds = max_gap_seconds
         self.model = None
 
-    def create_sequences_grouped(self):
+    def create_sequences_with_index(self):
         """
         Gera sequências temporais respeitando o mesmo veículo e continuidade temporal.
         Returns:
-            tuple: (np.ndarray de sequências, np.ndarray de índices válidos no dataset original)
-        """
-        """
-        Gera sequências temporais respeitando o mesmo veículo e continuidade temporal.
-        Cada sequência contém apenas dados do mesmo veículo, respeitando o gap máximo.
-
-        Returns:
-            tuple: (np.ndarray de sequências, np.ndarray de índices válidos no dataset original)
+            tuple: (np.ndarray de sequências, np.ndarray de índices originais ancorados no fim da janela)
         """
         X_seq_list = []
         valid_indices_list = []
-        
         unique_vehicles = np.unique(self.vehicle_ids)
-        
-        # Conversão de timedelta para segundos (numpy)
         max_gap_ns = np.timedelta64(self.max_gap_seconds, 's')
-        
         for vehicle in unique_vehicles:
-            # Índices onde este veículo aparece
             idx_vehicle = np.where(self.vehicle_ids == vehicle)[0]
-            
             if len(idx_vehicle) <= self.window_size:
                 continue
-                
-            # Extração dos dados desse veículo
             vehicle_data = self.X[idx_vehicle]
             vehicle_times = self.timestamps[idx_vehicle]
-            
-            # Janela Deslizante
+            vehicle_indices = self.original_indices[idx_vehicle]
             for i in range(len(vehicle_data) - self.window_size + 1):
-                # Defines timestamps do início e fim da janela candidata
-                t_start = vehicle_times[i]
-                t_end = vehicle_times[i + self.window_size - 1]
-                
-                # VERIFICAÇÃO DE GAP (Sua preocupação resolvida aqui)
-                # Se a janela cobre um período maior que o permitido (ex: 5 min), descarta.
+                window_times = vehicle_times[i : i + self.window_size]
+                # Verificação rigorosa: nenhum gap consecutivo pode exceder max_gap_ns
+                gaps = window_times[1:] - window_times[:-1]
+                if np.any(gaps > max_gap_ns):
+                    continue
+                t_start = window_times[0]
+                t_end = window_times[-1]
+                # (opcional) manter também a verificação global
                 if (t_end - t_start) > max_gap_ns:
                     continue
-                
-                # Se passou no teste de tempo, adiciona a sequência
                 seq = vehicle_data[i : i + self.window_size]
                 X_seq_list.append(seq)
-                
-                # Mapeia índice original do último ponto
-                original_idx = idx_vehicle[i + self.window_size - 1]
+                original_idx = vehicle_indices[i + self.window_size - 1]
                 valid_indices_list.append(original_idx)
-                
         if len(X_seq_list) == 0:
             return np.array([]), np.array([])
-            
         return np.array(X_seq_list), np.array(valid_indices_list)
 
     @log_execution
@@ -90,34 +71,21 @@ class LSTMPipeline:
             mask_train (np.ndarray or None): Máscara booleana para treino.
             epochs (int): Número de épocas de treino.
         Returns:
-            tuple: (np.ndarray de MSE alinhado ao dataset original, modelo treinado)
+            tuple: (np.ndarray de MSE, np.ndarray de índices originais, modelo treinado)
         """
-        """
-        Treina e avalia um modelo LSTM Autoencoder para detecção de anomalias sequenciais.
-        Permite treinar com diferentes groundtruths (máscaras de treino) para análise comparativa.
-
-        Args:
-            strategy_name (str): Nome da estratégia/variação (usado para rotular outputs).
-            mask_train (np.ndarray or None): Máscara booleana indicando quais índices usar para treino.
-            epochs (int): Número de épocas de treino.
-
-        Returns:
-            tuple: (np.ndarray de MSE alinhado ao dataset original, modelo treinado)
-        """
-        # 1. Gerar sequências com proteção de gap
         print(f"   ↳ [LSTM] Gerando sequências (Gap Max: {self.max_gap_seconds}s)...")
-        X_seq_all, indices_all = self.create_sequences_grouped()
+        X_seq_all, indices_all = self.create_sequences_with_index()
         if len(X_seq_all) == 0:
             print(f"   ⚠️ Nenhuma sequência válida encontrada para {strategy_name} (Verifique gaps).")
-            return np.full(len(self.X), np.nan), None
+            return None, None, None
         # 2. Filtragem por Máscara (Treino Semi-supervisionado)
         if mask_train is not None:
-            allowed_indices = set(np.where(mask_train)[0])
-            train_mask = [idx in allowed_indices for idx in indices_all]
+            mask_series = pd.Series(mask_train, index=self.original_indices)
+            train_mask = mask_series.loc[indices_all].values.astype(bool)
             X_train = X_seq_all[train_mask]
             if len(X_train) == 0:
-                 print(f"   ⚠️ Treino vazio após filtro de máscara.")
-                 return np.full(len(self.X), np.nan), None
+                print(f"   ⚠️ Treino vazio após filtro de máscara.")
+                return None, None, None
         else:
             X_train = X_seq_all
         # 3. Modelo e Treino
@@ -137,7 +105,5 @@ class LSTMPipeline:
         # 4. Inferência
         X_pred = model.predict(X_seq_all, verbose=0)
         mse_sequences = np.mean(np.power(X_seq_all - X_pred, 2), axis=(1, 2))
-        # 5. Mapeamento Reverso
-        full_mse_aligned = np.full(len(self.X), np.nan)
-        full_mse_aligned[indices_all] = mse_sequences
-        return full_mse_aligned, model
+        # Retorna: O Score (MSE), Os Índices (Onde salvar), O Modelo
+        return mse_sequences, indices_all, model
