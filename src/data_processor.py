@@ -10,6 +10,10 @@ with open('config_mapeamento.yaml', 'r') as config_file:
     CONFIG = yaml.safe_load(config_file)
 
 class DataProcessor:
+    """
+    Classe responsável pelo processamento e engenharia de dados para o pipeline de detecção de anomalias.
+    Inclui carregamento, padronização, criação de features temporais, espaciais e contextuais.
+    """
     def __init__(self, config):
         """
         Inicializa o DataProcessor com o dicionário de configuração.
@@ -24,6 +28,8 @@ class DataProcessor:
     def map_cols(self):
         """
         Retorna o dicionário de mapeamento de colunas do config.
+        Returns:
+            dict: Mapeamento de colunas.
         """
         return self.config['mapeamento_colunas']
 
@@ -34,7 +40,7 @@ class DataProcessor:
         Args:
             filepath (str): Caminho do arquivo CSV ou Parquet.
         Returns:
-            dask.dataframe.DataFrame: DataFrame padronizado.
+            pd.DataFrame: DataFrame padronizado e ordenado.
         """
         import dask.dataframe as dd
         # Detecção automática de formato
@@ -56,7 +62,6 @@ class DataProcessor:
             try:
                 df = df.compute().sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
             except Exception:
-                # Se já for pandas, apenas ordena
                 df = df.sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
         else:
             df = df.sort_values(by=[self.map_cols['placa'], self.map_cols['timestamp']])
@@ -68,11 +73,11 @@ class DataProcessor:
         Args:
             lat1, lon1, lat2, lon2: Arrays de latitude/longitude.
         Returns:
-            np.ndarray: Distâncias em km.
+            np.ndarray: Distâncias em metros.
         """
-        R = 6371  # Raio da Terra em km
+        R = 6371000  # Raio da Terra em metros
         phi1, phi2 = np.radians(lat1), np.radians(lat2)
-        dphi = np.radians(lon2 - lon1)
+        dphi = np.radians(lat2 - lat1)
         dlambda = np.radians(lon2 - lon1)
         a = np.sin(dphi/2)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2)**2
         return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
@@ -81,10 +86,11 @@ class DataProcessor:
     def feature_engineering(self, df):
         """
         Realiza a engenharia de features temporais, espaciais e contextuais no DataFrame.
+        Inclui hora, dia da semana, feriado, velocidade (m/s), aceleração (m/s²) e prepara para Região Administrativa.
         Args:
-            df (dask.dataframe.DataFrame): DataFrame de entrada.
+            df (pd.DataFrame): DataFrame de entrada.
         Returns:
-            dask.dataframe.DataFrame: DataFrame com novas features.
+            pd.DataFrame: DataFrame com novas features.
         """
         import dask.dataframe as dd
         import dask
@@ -114,36 +120,39 @@ class DataProcessor:
             df['eh_feriado'] = df['timestamp'].dt.date.apply(lambda d: 1 if pd.to_datetime(d, errors='coerce') in br_holidays else 0)
         self.features_to_use.append('eh_feriado')
 
-        # 3. Features Espaciais (Velocidade/Aceleração)
+        # 3. Features Espaciais (Velocidade/Aceleração em m/s)
         if self.map_cols['latitude'] in df.columns and self.map_cols['longitude'] in df.columns:
             # Shift para pegar o ponto anterior do MESMO veículo
             df['lat_prev'] = df.groupby(self.map_cols['placa'])[self.map_cols['latitude']].shift(1)
             df['lon_prev'] = df.groupby(self.map_cols['placa'])[self.map_cols['longitude']].shift(1)
             df['time_prev'] = df.groupby(self.map_cols['placa'])[self.map_cols['timestamp']].shift(1)
 
-            # Distância
-            df['dist_km'] = dd.from_array(self._haversine_vectorized(
+            # Distância em metros
+            df['dist_m'] = dd.from_array(self._haversine_vectorized(
                 df['latitude'].values,
                 df['longitude'].values,
                 df['lat_prev'].values,
                 df['lon_prev'].values
             )).fillna(0)
 
-            # Tempo (em horas)
-            df['delta_time_h'] = (df['timestamp'] - df['time_prev']).dt.total_seconds() / 3600
-            df['delta_time_h'] = df['delta_time_h'].replace(0, np.nan) # Evitar div por zero
-            # Velocidade (km/h)
-            df['velocidade_calc'] = df['dist_km'] / df['delta_time_h']
-            df['velocidade_calc'] = df['velocidade_calc'].fillna(0)
+            # Tempo (em segundos)
+            df['delta_time_s'] = (df['timestamp'] - df['time_prev']).dt.total_seconds()
+            df['delta_time_s'] = df['delta_time_s'].replace(0, np.nan) # Evitar div por zero
+            # Velocidade (m/s)
+            df['velocidade_ms'] = df['dist_m'] / df['delta_time_s']
+            df['velocidade_ms'] = df['velocidade_ms'].fillna(0)
             # Limpeza de ruído extremo (GPS teleport)
-            df = df[df['velocidade_calc'] < 1200]
-            self.features_to_use.extend(['velocidade_calc', 'dist_km'])
+            df = df[df['velocidade_ms'] < 333]  # 1200 km/h = 333 m/s
+            self.features_to_use.extend(['velocidade_ms', 'dist_m'])
             # Aceleração (Delta V / Delta T)
-            df['vel_prev'] = df.groupby(self.map_cols['placa'])['velocidade_calc'].shift(1)
-            df['aceleracao'] = (df['velocidade_calc'] - df['vel_prev']) / df['delta_time_h']
+            df['vel_prev'] = df.groupby(self.map_cols['placa'])['velocidade_ms'].shift(1)
+            df['aceleracao'] = (df['velocidade_ms'] - df['vel_prev']) / df['delta_time_s']
             df['aceleracao'] = df['aceleracao'].fillna(0)
             self.features_to_use.append('aceleracao')
 
+        # 4. Região Administrativa (placeholder para futura integração)
+        if 'regiao_adm' in df.columns:
+            self.features_to_use.append('regiao_adm')
         # Drop NaNs residuais nas features usadas
         df = df.dropna(subset=self.features_to_use)
         return df

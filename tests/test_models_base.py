@@ -19,6 +19,6 @@ def test_train_iso():
 def test_train_lof():
     X = np.random.rand(100, 5)
     model = BaselineModels(X)
-    labels, scores = model.train_lof(k_neighbors=5, strategy='standard')
+    labels, scores = model.train_lof(k_neighbors=5)
     assert len(labels) == 100
     assert len(scores) == 100

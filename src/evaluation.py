@@ -9,18 +9,17 @@ class ThresholdOptimizer:
     Otimiza thresholds de detecção usando múltiplos percentis.
     Útil para balancear Precision vs Recall em detecção de anomalias.
     """
-    def __init__(self, percentiles):
+    def __init__(self, percentiles=None):
         """
         Inicializa o otimizador de thresholds para detecção de anomalias.
         Args:
-            percentiles (list): Lista de percentis para testar.
+            percentiles (list, opcional): Lista de percentis para testar. Se None, usa padrão.
         """
-        """
-        Inicializa o otimizador de thresholds para detecção de anomalias.
-        Args:
-            percentiles (list): Lista de percentis para testar. Ex: [90, 95, 99]
-        """
-        self.percentiles = sorted(percentiles)  # Garantir ordem crescente
+        # Padrão: ISO = 200, LOF = 20, mas permite variantes
+        if percentiles is None:
+            self.percentiles = sorted([90, 95, 99, 200, 20])
+        else:
+            self.percentiles = sorted(percentiles)
         
     def apply_dynamic_thresholds(self, df, score_col, model_name):
         """

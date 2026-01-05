@@ -25,4 +25,4 @@ def test_feature_engineering():
     df = proc.load_and_standardize('data/input/amostra_ssp.csv')
     df_feat = proc.feature_engineering(df)
     assert 'hora_sin' in df_feat.columns
-    assert 'velocidade_calc' in df_feat.columns
+    assert 'velocidade_ms' in df_feat.columns

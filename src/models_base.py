@@ -41,42 +41,22 @@ class BaselineModels:
         return labels, scores, model
 
     @log_execution
-    def train_lof(self, k_neighbors=20, contamination='auto', strategy='standard', mask_inliers=None):
+    def train_lof(self, k_neighbors=20, contamination='auto'):
         """
-        Treina o modelo Local Outlier Factor (LOF) para detecção de anomalias.
+        Treina o modelo Local Outlier Factor (LOF) para detecção de anomalias usando apenas o modo 'standard'.
         Args:
             k_neighbors (int): Número de vizinhos.
             contamination (str ou float): Proporção de anomalias.
-            strategy (str): 'standard' ou 'novelty'.
-            mask_inliers (np.ndarray ou None): Máscara de inliers para treino novelty.
         Returns:
             tuple: (labels, scores)
-        """
-        """
-        strategy: 'standard' (treina em tudo) ou 'novelty' (treina só nos inliers do ISO)
         """
         model = LocalOutlierFactor(
             n_neighbors=k_neighbors,
             contamination=contamination,
-            novelty=(strategy == 'novelty'),
+            novelty=False,
             n_jobs=-1
         )
-        
-        if strategy == 'novelty':
-            if mask_inliers is None:
-                raise ValueError("Para LOF Novelty, mask_inliers é obrigatório.")
-            
-            # Treina APENAS nos dados considerados limpos (inliers)
-            X_train = self.X[mask_inliers]
-            model.fit(X_train)
-            
-            # Prediz em TUDO
-            preds = model.predict(self.X)
-            scores = model.score_samples(self.X)
-            
-        else: # Standard
-            preds = model.fit_predict(self.X)
-            scores = model.negative_outlier_factor_
-            
+        preds = model.fit_predict(self.X)
+        scores = model.negative_outlier_factor_
         labels = np.where(preds == -1, 1, 0)
         return labels, scores

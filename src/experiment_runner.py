@@ -3,7 +3,6 @@
 import pandas as pd
 import numpy as np
 import yaml
-import os
 import json
 import itertools
 from dask_ml.preprocessing import MinMaxScaler
@@ -21,7 +20,7 @@ def run_experiment():
     1. Ingestão e Adaptação (Mapeamento via Config).
     2. Sanitização Genérica (Tratamento de tipos e nulos).
     3. Feature Engineering Condicional (Só calcula o que os dados permitirem).
-    4. Modelagem Pontual (Isolation Forest, LOF Clássico, LOF Novelty).
+    4. Modelagem Pontual (Isolation Forest, LOF Clássico).
     5. Geração de Ground Truths Sintéticos (União e Interseção).
     6. Modelagem Sequencial (LSTM-AE treinado sobre diferentes GTs).
     7. Consolidação da Master Table de Evidências.
@@ -37,7 +36,7 @@ def run_experiment():
         pd.DataFrame: Master DataFrame ('benchmark_results') contendo:
             - Colunas originais mapeadas e features calculadas (condicionais).
             - Scores e Labels do Isolation Forest.
-            - Scores e Labels do LOF (Clássico e Novelty).
+            - Scores e Labels do LOF (Clássico).
             - Labels dos Ground Truths Sintéticos (GT_Uniao, GT_Intersecao).
             - Erros de Reconstrução (MAE/MSE) e Labels dos modelos LSTM-AE 
               (variantes Uniao, Intersecao e Sujo).
@@ -155,20 +154,14 @@ def run_experiment():
     print("\n" + "-" * 40)
     print("🔍 TREINANDO VARIAÇÕES LOF")
     for k in [10, 20]:
-        for strat in ['standard', 'novelty']:
-            tag = f"LOF_k{k}_{strat}"
-            print(f"   ↳ {tag}...")
-            
-            try:
-                # Se for novelty, precisa de uma máscara. Usaremos o ISO_n100 como padrão 
-                # apenas para viabilizar o treino do LOF Novelty (exigência do algoritmo)
-                mask_input = iso_masks_registry['ISO_n100'] if strat == 'novelty' else None
-                
-                labels, scores, model = models_base.train_lof(k_neighbors=k, strategy=strat, mask_inliers=mask_input)
-                # Salvar modelo LOF
-                import joblib
-                import os
-                os.makedirs('outputs/models_saved', exist_ok=True)
+        tag = f"LOF_k{k}_standard"
+        print(f"   ↳ {tag}...")
+        try:
+            labels, scores = models_base.train_lof(k_neighbors=k)
+            # Salvar modelo LOF
+            import joblib
+            import os
+            os.makedirs('outputs/models_saved', exist_ok=True)
                 joblib.dump(model, f'outputs/models_saved/lof_k{k}_{strat}.joblib')
                 
                 df[f'{tag}_score'] = -scores
