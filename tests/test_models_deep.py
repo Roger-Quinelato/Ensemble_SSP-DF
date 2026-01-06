@@ -6,7 +6,7 @@ Garante que os modelos deep learning funcionam corretamente e retornam resultado
 """
 import pytest
 import numpy as np
-from src.models_deep import LSTMPipeline
+from src.models.models_deep import LSTMPipeline
 
 def test_create_sequences_with_index():
     X = np.random.rand(20, 3)

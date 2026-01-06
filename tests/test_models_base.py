@@ -6,7 +6,7 @@ Garante que os modelos base funcionam corretamente e retornam resultados esperad
 """
 import pytest
 import numpy as np
-from src.models_base import BaselineModels
+from src.models.models_base import BaselineModels
 
 def test_train_iso():
     X = np.random.rand(100, 5)

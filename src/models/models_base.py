@@ -3,7 +3,7 @@
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
 import numpy as np
-from .logger_utils import log_execution
+from src.utils.logger_utils import log_execution
 
 class BaselineModels:
     def __init__(self, X_data):

@@ -2,7 +2,7 @@
 
 import numpy as np
 import pandas as pd
-from .logger_utils import log_execution
+from src.utils.logger_utils import log_execution
 
 class ThresholdOptimizer:
     """

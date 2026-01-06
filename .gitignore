@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dados e Outputs (Importante!)
+data/input/*
+!data/input/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Logs
+*.log
+
+# Cursor/VSCode
+.vscode/
+! .vscode/settings.json
+! .vscode/launch.json

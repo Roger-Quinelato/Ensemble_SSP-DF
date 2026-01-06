@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import holidays
 import yaml
-from .logger_utils import log_execution
+from src.utils.logger_utils import log_execution
 
 with open('config_mapeamento.yaml', 'r') as config_file:
     CONFIG = yaml.safe_load(config_file)

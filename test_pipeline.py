@@ -3,7 +3,7 @@ Teste de integração do pipeline principal.
 Valida se o fluxo completo executa e gera os principais arquivos de saída.
 """
 import os
-from src.experiment_runner import run_experiment
+from src.pipeline.experiment_runner import run_experiment
 
 def test_pipeline_flow():
     run_experiment()

@@ -7,7 +7,7 @@ Garante que as métricas e avaliações estão corretas e robustas para diferent
 import pytest
 import numpy as np
 import pandas as pd
-from src.evaluation import ThresholdOptimizer, GroundTruthComparator
+from src.utils.evaluation import ThresholdOptimizer, GroundTruthComparator
 
 def test_apply_dynamic_thresholds():
     df = pd.DataFrame({'score': np.random.rand(100)})

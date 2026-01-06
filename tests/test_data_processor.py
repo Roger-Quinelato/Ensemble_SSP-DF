@@ -6,7 +6,7 @@ Garante que o DataProcessor está funcionando conforme esperado e que as princip
 """
 import pytest
 import pandas as pd
-from src.data_processor import DataProcessor
+from src.data.data_processor import DataProcessor
 import yaml
 
 def test_load_and_standardize():
