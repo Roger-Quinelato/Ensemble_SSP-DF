@@ -12,7 +12,7 @@ mapeamento_colunas:
   timestamp: "timestamp" 
   latitude: "latitude"
   longitude: "longitude"
-  RA: "regiao_adm  import os"
+  RA: "regiao_adm"
   
 # 2. CONFIGURAÇÃO DE ENGENHARIA DE FEATURES
 parametros:
