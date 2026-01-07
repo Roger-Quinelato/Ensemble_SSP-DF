@@ -61,7 +61,8 @@ def run_experiment():
         grouped = grouped.compute()
 
     if not grouped.empty:
-        local_mais_fluxo = grouped.sort_values(ascending=False).reset_index().iloc[0]
+        local_mais_fluxo = grouped.sort_values(
+            ascending=False).reset_index().iloc[0]
         stats = {
             "total_veiculos": int(df[map_cols["placa"]].nunique()),
             "periodo": f"{df[map_cols['timestamp']].min()} a {df[map_cols['timestamp']].max()}",
@@ -86,7 +87,7 @@ def run_experiment():
 
     # Preparação ML
     import dask.dataframe as dd
-
+    # Corrigido: usar dd.DataFrame para checagem
     if isinstance(df, dd.DataFrame):
         df_pd = df.compute()
     else:
@@ -128,7 +129,8 @@ def run_experiment():
         df[f"{tag}_score"] = -scores
         score_columns_audit.append(f"{tag}_score")
 
-        df, metrics = optimizer.apply_dynamic_thresholds(df, f"{tag}_score", tag)
+        df, metrics = optimizer.apply_dynamic_thresholds(
+            df, f"{tag}_score", tag)
         results_summary.extend(metrics)
         iso_masks_registry[tag] = df[f"{tag}_p95_label"] == 0
 
@@ -141,12 +143,14 @@ def run_experiment():
         try:
             labels, scores, model = models_base.train_hbos(n_bins=n_bins)
             # HBOS pode ser salvo via joblib
-            joblib.dump(model, f"outputs/models_saved/hbos_bins{n_bins}.joblib")
+            joblib.dump(
+                model, f"outputs/models_saved/hbos_bins{n_bins}.joblib")
 
             df[f"{tag}_score"] = scores
             score_columns_audit.append(f"{tag}_score")
 
-            df, metrics = optimizer.apply_dynamic_thresholds(df, f"{tag}_score", tag)
+            df, metrics = optimizer.apply_dynamic_thresholds(
+                df, f"{tag}_score", tag)
             results_summary.extend(metrics)
             hbos_masks_registry[tag] = df[f"{tag}_p95_label"] == 0
         except Exception as e:
@@ -163,7 +167,7 @@ def run_experiment():
         "gap_segmentation_seconds", 300
     )
     lstm_pipe = LSTMPipeline(
-        X_data=X_scaled,
+        X_data=X_real,
         vehicle_ids=df[map_cols["placa"]].values,
         timestamps=df[map_cols["timestamp"]].values,
         original_indices=df.index.values,
@@ -244,18 +248,22 @@ def run_experiment():
     print("💾 SALVANDO RESULTADOS")
 
     if hasattr(df, "to_parquet"):
-        df.to_parquet("outputs/master_table/resultado_final.parquet", index=False)
+        df.to_parquet(
+            "outputs/master_table/resultado_final.parquet", index=False)
     else:
         pd.DataFrame(df).to_parquet(
             "outputs/master_table/resultado_final.parquet", index=False
         )
 
     iso_metrics = [m for m in results_summary if m["Model"].startswith("ISO")]
-    hbos_metrics = [m for m in results_summary if m["Model"].startswith("HBOS")]
-    lstm_metrics = [m for m in results_summary if m["Model"].startswith("LSTM")]
+    hbos_metrics = [
+        m for m in results_summary if m["Model"].startswith("HBOS")]
+    lstm_metrics = [
+        m for m in results_summary if m["Model"].startswith("LSTM")]
 
     if iso_metrics:
-        pd.DataFrame(iso_metrics).to_csv("outputs/metrics/iso_metrics.csv", index=False)
+        pd.DataFrame(iso_metrics).to_csv(
+            "outputs/metrics/iso_metrics.csv", index=False)
     if hbos_metrics:
         pd.DataFrame(hbos_metrics).to_csv(
             "outputs/metrics/hbos_metrics.csv", index=False
@@ -277,9 +285,12 @@ def run_experiment():
     # Garante que as colunas existem antes de filtrar
     cols_present = [c for c in id_cols if c in df.columns]
 
-    df_iso = df[cols_present + [col for col in df.columns if col.startswith("ISO")]]
-    df_hbos = df[cols_present + [col for col in df.columns if col.startswith("HBOS")]]
-    df_lstm = df[cols_present + [col for col in df.columns if col.startswith("LSTM")]]
+    df_iso = df[cols_present +
+                [col for col in df.columns if col.startswith("ISO")]]
+    df_hbos = df[cols_present +
+                 [col for col in df.columns if col.startswith("HBOS")]]
+    df_lstm = df[cols_present +
+                 [col for col in df.columns if col.startswith("LSTM")]]
 
     # Função auxiliar para salvar
     def safe_save(dframe, fname):
