@@ -44,8 +44,8 @@ def compilar_descricoes():
         fname = os.path.basename(f)
         if 'ISO' in fname:
             families.setdefault('ISO', []).append(f)
-        elif 'LOF' in fname:
-            families.setdefault('LOF', []).append(f)
+        elif 'HBOS' in fname:
+            families.setdefault('HBOS', []).append(f)
         elif 'LSTM' in fname:
             families.setdefault('LSTM', []).append(f)
         # Adicione outras famílias se necessário
@@ -59,7 +59,7 @@ def mover_arquivos_finais():
     """Move arquivos finais de métricas/resultados para a pasta de reports."""
     final_files = [
         'iso_metrics.csv', 'iso_results.csv',
-        'lof_metrics.csv', 'lof_results.csv',
+        'hbos_metrics.csv', 'hbos_results.csv',
         'lstm_metrics.csv', 'lstm_results.csv'
     ]
     for fname in final_files:

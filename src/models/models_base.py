@@ -1,7 +1,7 @@
 # src/models_base.py
 
 from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import LocalOutlierFactor
+from pyod.models.hbos import HBOS
 import numpy as np
 from src.utils.logger_utils import log_execution
 
@@ -41,22 +41,24 @@ class BaselineModels:
         return labels, scores, model
 
     @log_execution
-    def train_lof(self, k_neighbors=20, contamination='auto'):
+    def train_hbos(self, n_bins=10, contamination='auto'):
         """
-        Treina o modelo Local Outlier Factor (LOF) para detecção de anomalias usando apenas o modo 'standard'.
+        Treina o modelo Histogram-Based Outlier Score (HBOS) para detecção de anomalias.
         Args:
-            k_neighbors (int): Número de vizinhos.
-            contamination (str ou float): Proporção de anomalias.
+            n_bins (int): Número de bins do histograma.
+            contamination (float): Proporção de anomalias.
         Returns:
-            tuple: (labels, scores)
+            tuple: (labels, scores, modelo treinado)
         """
-        model = LocalOutlierFactor(
-            n_neighbors=k_neighbors,
-            contamination=contamination,
-            novelty=False,
-            n_jobs=-1
-        )
-        preds = model.fit_predict(self.X)
-        scores = model.negative_outlier_factor_
-        labels = np.where(preds == -1, 1, 0)
-        return labels, scores
+            results = {}
+            for n_bins in [10, 20, 30]:
+                model = HBOS(n_bins=n_bins, contamination=contamination)
+                model.fit(self.X)
+                scores = model.decision_scores_
+                labels = model.labels_
+                results[n_bins] = {
+                    'labels': labels,
+                    'scores': scores,
+                    'model': model
+                }
+            return results
