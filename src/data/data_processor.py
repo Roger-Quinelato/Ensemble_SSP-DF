@@ -43,13 +43,14 @@ class DataProcessor:
         df = df.rename(columns=self.map_cols)
 
         # Garantir Tipagem
-        df["timestamp"] = dd.to_datetime(df[self.map_cols["timestamp"]])
+        df["timestamp"] = dd.to_datetime(df["timestamp"])
 
-        for col in [self.map_cols["latitude"], self.map_cols["longitude"]]:
+        # Corrigido: usar nome padronizado das colunas, não o mapeamento original
+        for col in ["latitude", "longitude"]:
             if col in df.columns:
                 df[col] = df[col].astype(float)
 
-        df = df.dropna(subset=[self.map_cols["timestamp"], self.map_cols["placa"]])
+        df = df.dropna(subset=["timestamp", "placa"])
 
         return df
 
@@ -76,15 +77,7 @@ class DataProcessor:
         df["hora"] = df["timestamp"].dt.hour
         df["dia_sem"] = df["timestamp"].dt.dayofweek
 
-        # --- CICLICIDADE DE DIA DA SEMANA E MÊS (opcional, descomentando ativa) ---
-        # df['dia_sem_sin'] = np.sin(2 * np.pi * df['dia_sem'] / 7)
-        # df['dia_sem_cos'] = np.cos(2 * np.pi * df['dia_sem'] / 7)
-        # df['mes'] = df['timestamp'].dt.month
-        # df['mes_sin'] = np.sin(2 * np.pi * df['mes'] / 12)
-        # df['mes_cos'] = np.cos(2 * np.pi * df['mes'] / 12)
-        # Para ativar, adicione as variáveis abaixo em self.features_to_use:
-        # ['dia_sem_sin', 'dia_sem_cos', 'mes_sin', 'mes_cos']
-
+        # Ciclicidade de hora
         if hasattr(df, "map_partitions"):
             df["hora_sin"] = df["hora"].map_partitions(
                 lambda x: np.sin(2 * np.pi * x / 24), meta=("hora", "float64")
@@ -116,20 +109,16 @@ class DataProcessor:
         self.features_to_use.append("eh_feriado")
 
         # 3. Features Espaciais (Velocidade/Aceleração)
-        if (
-            self.map_cols["latitude"] in df.columns
-            and self.map_cols["longitude"] in df.columns
-        ):
-            df["lat_prev"] = df.groupby(self.map_cols["placa"])[
-                self.map_cols["latitude"]
-            ].shift(1)
-            df["lon_prev"] = df.groupby(self.map_cols["placa"])[
-                self.map_cols["longitude"]
-            ].shift(1)
-            df["time_prev"] = df.groupby(self.map_cols["placa"])[
-                self.map_cols["timestamp"]
-            ].shift(1)
+        if "latitude" in df.columns and "longitude" in df.columns:
+            # Sort para garantir ordem temporal
+            df = df.sort_values(["placa", "timestamp"])
+            
+            # Shift com meta especificado para evitar warnings do Dask
+            df["lat_prev"] = df.groupby("placa")["latitude"].shift(1, meta=("latitude", "float64"))
+            df["lon_prev"] = df.groupby("placa")["longitude"].shift(1, meta=("longitude", "float64"))
+            df["time_prev"] = df.groupby("placa")["timestamp"].shift(1, meta=("timestamp", "datetime64[ns]"))
 
+            # Calcular distância
             dist = self._haversine_vectorized(
                 df["latitude"], df["longitude"], df["lat_prev"], df["lon_prev"]
             )
@@ -137,47 +126,62 @@ class DataProcessor:
             if hasattr(dist, "fillna"):
                 df["dist_m"] = dist.fillna(0)
             else:
-                df["dist_m"] = da.from_array(dist).fillna(0)
+                df["dist_m"] = da.from_array(np.array(dist), chunks='auto').fillna(0)
 
+            # Calcular tempo decorrido
             df["delta_time_s"] = (
                 (df["timestamp"] - df["time_prev"]).dt.total_seconds().fillna(0)
             )
             df["delta_time_h"] = df["delta_time_s"] / 3600
+
+            # Velocidade em km/h
             df["velocidade_kmh"] = (df["dist_m"] / 1000) / df["delta_time_h"].replace(
                 0, np.nan
             )
             df["velocidade_kmh"] = df["velocidade_kmh"].fillna(0)
+            
+            self.features_to_use.extend(["velocidade_kmh", "dist_m"])
 
-            self.features_to_use.extend(["velocidade_ms", "dist_m"])
-
-            df["vel_prev"] = df.groupby(self.map_cols["placa"])["velocidade_kmh"].shift(
-                1
-            )
+            # Aceleração
+            df["vel_prev"] = df.groupby("placa")["velocidade_kmh"].shift(1, meta=("velocidade_kmh", "float64"))
             df["aceleracao"] = (
                 (df["velocidade_kmh"] - df["vel_prev"]) * 1000 / 3600
             ) / df["delta_time_s"].replace(0, np.nan)
             df["aceleracao"] = df["aceleracao"].fillna(0)
-            df["aceleracao"] = df["aceleracao"].fillna(0)
 
             self.features_to_use.append("aceleracao")
 
-        # 4. Região Administrativa (AGORA COM GET_DUMMIES)
-        if "regiao_adm" in df.columns:
-            # Dask exige saber as categorias conhecidas antes de criar dummies
-            df = df.categorize(columns=["regiao_adm"])
-            # Gera colunas como: RA_Ceilandia, RA_PlanoPiloto, etc. (0 ou 1)
-            df = (
-                dd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
-                if hasattr(dd, "get_dummies")
-                else pd.get_dummies(df.compute(), columns=["regiao_adm"], prefix="RA")
-            )
+            # Limpar colunas temporárias
+            df = df.drop(columns=["lat_prev", "lon_prev", "time_prev", "vel_prev", 
+                                   "delta_time_s", "delta_time_h"], errors="ignore")
 
-            # Identifica as novas colunas criadas e adiciona na lista para a IA
-            # (No Dask, columns é avaliado imediatamente, então isso funciona)
+        # 4. Região Administrativa (COM GET_DUMMIES)
+        if "regiao_adm" in df.columns:
+            # Para Dask: precisa categorizar E especificar as categorias conhecidas
+            if hasattr(df, "map_partitions"):
+                # Primeiro, compute as categorias únicas (necessário para Dask)
+                categorias_unicas = df["regiao_adm"].unique().compute()
+                
+                # Converte para categorical com categorias conhecidas
+                df["regiao_adm"] = df["regiao_adm"].astype(
+                    pd.CategoricalDtype(categories=categorias_unicas)
+                )
+                
+                # Agora get_dummies funciona
+                df = dd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
+            else:
+                # Para Pandas (mais simples)
+                df = pd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
+
+            # Identificar novas colunas criadas
             new_cols = [c for c in df.columns if c.startswith("RA_")]
             self.features_to_use.extend(new_cols)
 
         # Drop NaNs apenas nas colunas essenciais
-        df = df.dropna(subset=self.features_to_use)
+        if self.features_to_use:
+            # Verificar quais features existem no DataFrame
+            existing_features = [f for f in self.features_to_use if f in df.columns]
+            if existing_features:
+                df = df.dropna(subset=existing_features)
 
         return df

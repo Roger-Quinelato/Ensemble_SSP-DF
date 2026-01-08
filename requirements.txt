@@ -1,6 +1,5 @@
 pyod>=1.1.0  # Para HBOS
 dask>=2023.4.0
-dask-ml
 pandas>=1.5.0
 # Numpy travado na 1.23.5 para não brigar com o TF 2.12
 numpy==1.23.5

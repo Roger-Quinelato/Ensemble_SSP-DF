@@ -1,5 +1,9 @@
 # src/pipeline/experiment_runner.py
 
+from src.utils.evaluation import ThresholdOptimizer, GroundTruthComparator
+from src.models.models_deep import LSTMPipeline
+from src.models.models_base import BaselineModels
+from src.data.data_processor import DataProcessor
 import os
 import pandas as pd
 import numpy as np
@@ -7,13 +11,6 @@ import yaml
 import json
 import itertools
 import joblib
-from dask_ml.preprocessing import MinMaxScaler
-
-# Imports ajustados para a nova estrutura de pastas
-from src.data.data_processor import DataProcessor
-from src.models.models_base import BaselineModels
-from src.models.models_deep import LSTMPipeline
-from src.utils.evaluation import ThresholdOptimizer, GroundTruthComparator
 
 
 def run_experiment():
@@ -51,7 +48,11 @@ def run_experiment():
 
     # Profiling Rápido
     dias = df[map_cols["timestamp"]].dt.date.nunique()
+    if hasattr(dias, "compute"):
+        dias = dias.compute()
     meses = df[map_cols["timestamp"]].dt.to_period("M").nunique()
+    if hasattr(meses, "compute"):
+        meses = meses.compute()
 
     # Agrupamento (compatível com Dask/Pandas)
     grouped = df.groupby([map_cols["latitude"], map_cols["longitude"]])[
@@ -63,21 +64,38 @@ def run_experiment():
     if not grouped.empty:
         local_mais_fluxo = grouped.sort_values(
             ascending=False).reset_index().iloc[0]
+        total_veiculos = df[map_cols["placa"]].nunique()
+        if hasattr(total_veiculos, "compute"):
+            total_veiculos = total_veiculos.compute()
+        periodo_min = df[map_cols['timestamp']].min()
+        if hasattr(periodo_min, "compute"):
+            periodo_min = periodo_min.compute()
+        periodo_max = df[map_cols['timestamp']].max()
+        if hasattr(periodo_max, "compute"):
+            periodo_max = periodo_max.compute()
+        if "velocidade_calc" in df.columns:
+            vel_media = df["velocidade_calc"].mean()
+            if hasattr(vel_media, "compute"):
+                vel_media = vel_media.compute()
+            vel_media = float(vel_media)
+        else:
+            vel_media = 0.0
+        dias_analise = int(dias)
+        meses_analise = int(meses)
+        local_mais_fluxo_latitude = float(
+            local_mais_fluxo[map_cols["latitude"]])
+        local_mais_fluxo_longitude = float(
+            local_mais_fluxo[map_cols["longitude"]])
+        fluxo_veiculos_local = int(local_mais_fluxo[map_cols["placa"]])
         stats = {
-            "total_veiculos": int(df[map_cols["placa"]].nunique()),
-            "periodo": f"{df[map_cols['timestamp']].min()} a {df[map_cols['timestamp']].max()}",
-            "vel_media": (
-                float(df["velocidade_calc"].mean())
-                if "velocidade_calc" in df.columns
-                else 0.0
-            ),
-            "dias_analise": int(dias),
-            "meses_analise": int(meses),
-            "local_mais_fluxo_latitude": float(local_mais_fluxo[map_cols["latitude"]]),
-            "local_mais_fluxo_longitude": float(
-                local_mais_fluxo[map_cols["longitude"]]
-            ),
-            "fluxo_veiculos_local": int(local_mais_fluxo[map_cols["placa"]]),
+            "total_veiculos": int(total_veiculos),
+            "periodo": f"{periodo_min} a {periodo_max}",
+            "vel_media": vel_media,
+            "dias_analise": dias_analise,
+            "meses_analise": meses_analise,
+            "local_mais_fluxo_latitude": local_mais_fluxo_latitude,
+            "local_mais_fluxo_longitude": local_mais_fluxo_longitude,
+            "fluxo_veiculos_local": fluxo_veiculos_local,
         }
     else:
         stats = {"info": "Base vazia ou sem agrupamento possível"}
