@@ -17,6 +17,6 @@ mapeamento_colunas:
 # 2. CONFIGURAÇÃO DE ENGENHARIA DE FEATURES
 parametros:
   percentis_teste: [90, 95, 99]
-  lstm_window_size: 2
+  lstm_window_size: 3
 configuracoes_gerais:
   gap_segmentation_seconds: 1800  # 30 minutos - Diminuir para uma análise mais sensível a paradas curtas
