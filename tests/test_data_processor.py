@@ -14,6 +14,8 @@ def test_load_and_standardize():
         config = yaml.safe_load(f)
     proc = DataProcessor(config)
     df = proc.load_and_standardize('data/input/amostra_ssp.csv')
+    if hasattr(df, "compute"):
+        df = df.compute()
     assert not df.empty
     assert 'placa' in df.columns
     assert 'timestamp' in df.columns
@@ -25,4 +27,4 @@ def test_feature_engineering():
     df = proc.load_and_standardize('data/input/amostra_ssp.csv')
     df_feat = proc.feature_engineering(df)
     assert 'hora_sin' in df_feat.columns
-    assert 'velocidade_ms' in df_feat.columns
+    assert 'velocidade_kmh' in df_feat.columns

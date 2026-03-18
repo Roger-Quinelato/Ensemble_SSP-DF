@@ -1,8 +1,26 @@
+# Dados (montar via volume)
+data/
+outputs/
+
+# Ambiente Python
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Git
 .git/
+.gitignore
+
+# IDE
 .vscode/
-outputs/
-cursorrules
-src/test_pipeline.py
-Ensemble_SSP-DF/test_pipeline.py
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentacao (nao necessaria na imagem)
+*.md
+LICENSE

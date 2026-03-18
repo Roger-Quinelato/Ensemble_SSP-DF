@@ -1,18 +1,3 @@
-def gerar_json_carros_por_ra():
-    """Gera um JSON com a quantidade de carros únicos por Região Administrativa (RA)."""
-    OUTPUT_JSON = os.path.join(REPORTS_DIR, 'quantidade_carros_por_ra.json')
-    # Preferir Parquet se existir
-    if os.path.exists(PARQUET_PATH):
-        df = pd.read_parquet(PARQUET_PATH)
-    else:
-        df = pd.read_csv(CSV_PATH)
-    if 'regiao_adm' in df.columns and 'placa' in df.columns:
-        carros_por_ra = df.groupby('regiao_adm')['placa'].nunique().to_dict()
-        with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
-            json.dump(carros_por_ra, f, ensure_ascii=False, indent=2)
-        print(f'✔️ JSON de quantidade de carros por RA salvo em {OUTPUT_JSON}')
-    else:
-        print('⚠️ Colunas regiao_adm ou placa não encontradas para gerar o JSON.')
 """
 Script de organização e compilação de arquivos de outputs e relatórios.
 Compila descrições, move arquivos finais, gera métricas e estatísticas iniciais da base de dados.
@@ -23,6 +8,7 @@ import glob
 import shutil
 import pandas as pd
 import json
+from src.utils.logger_utils import logger
 
 # Diretórios
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +39,7 @@ def compilar_descricoes():
         dfs = [pd.read_csv(f) for f in files]
         df_concat = pd.concat(dfs, ignore_index=True)
         df_concat.to_csv(os.path.join(REPORTS_DIR, f'describe_{fam}_compilado.csv'), index=False)
-    print('✔️ Descrições compiladas por família.')
+    logger.info("✔️ Descrições compiladas por família.")
 
 def mover_arquivos_finais():
     """Move arquivos finais de métricas/resultados para a pasta de reports."""
@@ -67,7 +53,7 @@ def mover_arquivos_finais():
         dst = os.path.join(REPORTS_DIR, fname)
         if os.path.exists(src):
             shutil.copy2(src, dst)
-    print('✔️ Arquivos finais movidos para reports.')
+    logger.info("✔️ Arquivos finais movidos para reports.")
 
 def mover_perfil_json():
     """Renomeia e move o perfil_dados.json para reports."""
@@ -75,7 +61,7 @@ def mover_perfil_json():
     new_json = os.path.join(REPORTS_DIR, 'InformacaoInicial_BaseDados.json')
     if os.path.exists(perfil_json):
         shutil.copy2(perfil_json, new_json)
-        print('✔️ perfil_dados.json movido e renomeado.')
+        logger.info("✔️ perfil_dados.json movido e renomeado.")
 
 def gerar_metricas_base():
     """Gera métricas e estatísticas iniciais da base de dados (CSV e Parquet)."""
@@ -107,20 +93,38 @@ def gerar_metricas_base():
     numeric_cols = df_raw.select_dtypes(include=['number']).columns
     if len(numeric_cols) > 0:
         df_raw[numeric_cols].describe().to_csv(os.path.join(REPORTS_DIR, 'EstatisticasIniciais_Numericas.csv'))
-    print('✔️ Métricas e estatísticas iniciais geradas.')
+    logger.info("✔️ Métricas e estatísticas iniciais geradas.")
 
 def mover_imagens():
     """Move imagens geradas para a pasta de reports (opcional, mantém cópia)."""
     for img_file in glob.glob(os.path.join(IMG_DIR, '*.jpg')):
         shutil.copy2(img_file, os.path.join(REPORTS_DIR, os.path.basename(img_file)))
-    print('✔️ Imagens copiadas para reports.')
+    logger.info("✔️ Imagens copiadas para reports.")
+
+def gerar_json_carros_por_ra():
+    """Gera um JSON com a quantidade de carros únicos por Região Administrativa (RA)."""
+    OUTPUT_JSON = os.path.join(REPORTS_DIR, 'quantidade_carros_por_ra.json')
+    # Preferir Parquet se existir
+    if os.path.exists(PARQUET_PATH):
+        df = pd.read_parquet(PARQUET_PATH)
+    else:
+        df = pd.read_csv(CSV_PATH)
+    if 'regiao_adm' in df.columns and 'placa' in df.columns:
+        carros_por_ra = df.groupby('regiao_adm')['placa'].nunique().to_dict()
+        with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
+            json.dump(carros_por_ra, f, ensure_ascii=False, indent=2)
+        logger.info(f"✔️ JSON de quantidade de carros por RA salvo em {OUTPUT_JSON}")
+    else:
+        logger.warning(
+            "⚠️ Colunas regiao_adm ou placa não encontradas para gerar o JSON."
+        )
 
 if __name__ == "__main__":
-    print('🔄 Organizando e compilando relatórios e arquivos...')
+    logger.info("🔄 Organizando e compilando relatórios e arquivos...")
     compilar_descricoes()
     mover_arquivos_finais()
     mover_perfil_json()
     gerar_metricas_base()
     gerar_json_carros_por_ra()
     mover_imagens()
-    print('✅ Relatórios compilados e arquivos organizados em outputs/reports/')
+    logger.info("✅ Relatórios compilados e arquivos organizados em outputs/reports/")

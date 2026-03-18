@@ -52,7 +52,7 @@ FEATURES_HBOS = [
     
     # Temporal: Padrão de atividade
     'hora',                # Substituído sin/cos - histograma mostra picos claros
-    'eh_fim_de_semana',    # Binária - padrões diferentes fim de semana
+    'dia_sem',             # Discreta - padrão de atividade por dia da semana
     'eh_feriado',          # Binária - contexto excepcional
     
     # Espacial agregado (SE DISPONÍVEL - criar no feature engineering)
@@ -147,7 +147,6 @@ LSTM_CONFIG = {
 EXCLUDE_HBOS = [
     'hora_sin',      # Substituído por 'hora' direta
     'hora_cos',      # Substituído por 'hora' direta
-    'dia_sem',       # Substituído por 'eh_fim_de_semana'
     # Todas as RA_* serão excluídas automaticamente
 ]
 
@@ -233,7 +232,7 @@ def get_feature_importance_order(model_name):
         ],
         'hbos': [
             'velocidade_kmh', 'aceleracao', 'dist_m',
-            'hora', 'eh_fim_de_semana', 'eh_feriado'
+            'hora', 'dia_sem', 'eh_feriado'
         ],
         'gru': [
             'velocidade_kmh', 'aceleracao', 'latitude', 'longitude',

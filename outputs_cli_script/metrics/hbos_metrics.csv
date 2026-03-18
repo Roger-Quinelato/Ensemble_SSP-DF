@@ -1,0 +1,7 @@
+Model,Percentile,Threshold_Value,Anomalies_Detected,Pct_Dataset,Calibrated_On
+HBOS_bins10,90,4.353541,20,20.0,train
+HBOS_bins10,95,4.353541,20,20.0,train
+HBOS_bins10,99,4.353541,20,20.0,train
+HBOS_bins20,90,0.644657,20,20.0,train
+HBOS_bins20,95,0.644657,20,20.0,train
+HBOS_bins20,99,0.644657,20,20.0,train

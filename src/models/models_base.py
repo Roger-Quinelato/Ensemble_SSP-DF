@@ -11,20 +11,12 @@ class BaselineModels:
         """
         Inicializa o BaselineModels com os dados de entrada.
         Args:
-            X_data (np.ndarray ou dask.dataframe.DataFrame): Dados normalizados.
+            X_data (np.ndarray ou pandas.DataFrame): Dados normalizados.
         """
-        # Se for Dask DataFrame, converte para numpy para modelagem
-        if hasattr(X_data, "compute"):
-            self.X = (
-                X_data.compute().values
-                if hasattr(X_data, "values")
-                else X_data.compute()
-            )
-        else:
-            self.X = X_data
-
+        self.X = X_data if isinstance(X_data, np.ndarray) else X_data.values
+        
     @log_execution
-    def train_iso(self, n_estimators=100, contamination="auto"):
+    def train_iso(self, n_estimators=100, contamination='auto'):
         """
         Treina o modelo Isolation Forest para detecção de anomalias.
         Args:
@@ -34,19 +26,20 @@ class BaselineModels:
             tuple: (labels, scores, modelo treinado)
         """
         model = IsolationForest(
-            n_estimators=n_estimators,
-            contamination=contamination,
-            n_jobs=-1,
-            random_state=42,
+            n_estimators=n_estimators, 
+            contamination=contamination, 
+            n_jobs=-1, 
+            random_state=42
         )
-        preds = model.fit_predict(self.X)
+        model.fit(self.X)
+        preds = model.predict(self.X)
         scores = model.score_samples(self.X)
         # 1: Normal, -1: Anomalia -> Converter para 0: Normal, 1: Anomalia
         labels = np.where(preds == -1, 1, 0)
         return labels, scores, model
 
     @log_execution
-    def train_hbos(self, n_bins=10, contamination="auto"):
+    def train_hbos(self, n_bins=10, contamination=0.1):
         """
         Treina o modelo Histogram-Based Outlier Score (HBOS) para detecção de anomalias.
         Args:
@@ -55,11 +48,9 @@ class BaselineModels:
         Returns:
             tuple: (labels, scores, modelo treinado)
         """
-        results = {}
-        for n_bins in [10, 20, 30]:
-            model = HBOS(n_bins=n_bins, contamination=contamination)
-            model.fit(self.X)
-            scores = model.decision_scores_
-            labels = model.labels_
-            results[n_bins] = {"labels": labels, "scores": scores, "model": model}
-        return results
+        model = HBOS(n_bins=n_bins, contamination=contamination)
+        model.fit(self.X)
+        scores = model.decision_scores_
+        labels = model.labels_
+        # Converter labels: 0 = Normal, 1 = Anomalia (HBOS já retorna assim)
+        return labels, scores, model

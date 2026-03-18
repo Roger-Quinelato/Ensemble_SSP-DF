@@ -1,0 +1,45 @@
+{
+    "total_veiculos": 10,
+    "periodo": "2025-12-02 18:30:00 a 2025-12-02 20:00:00",
+    "vel_media": 0.0833271205555973,
+    "dias_analise": 1,
+    "meses_analise": 1,
+    "local_mais_fluxo_latitude": -15.8099,
+    "local_mais_fluxo_longitude": -47.9899,
+    "fluxo_veiculos_local": 1,
+    "features_iso": [
+        "hora_sin",
+        "hora_cos",
+        "dia_sem",
+        "eh_feriado",
+        "velocidade_kmh",
+        "aceleracao",
+        "dist_m",
+        "RA_Lago Norte",
+        "RA_Paranoa",
+        "RA_Varjao"
+    ],
+    "features_hbos": [
+        "velocidade_kmh",
+        "aceleracao",
+        "dist_m",
+        "hora",
+        "dia_sem",
+        "eh_feriado"
+    ],
+    "features_gru": [
+        "velocidade_kmh",
+        "aceleracao",
+        "dist_m",
+        "latitude",
+        "longitude",
+        "hora_sin",
+        "hora_cos"
+    ],
+    "split_temporal": {
+        "cutoff_timestamp": "2025-12-02 19:40:00",
+        "train_size": 70,
+        "test_size": 30,
+        "train_ratio": 0.7
+    }
+}

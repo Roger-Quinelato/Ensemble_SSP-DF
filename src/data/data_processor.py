@@ -3,10 +3,11 @@
 import pandas as pd
 import numpy as np
 import yaml
-import dask.dataframe as dd
-import dask.array as da
 import holidays
+from sklearn.preprocessing import StandardScaler
+import joblib as _joblib
 from src.utils.logger_utils import log_execution
+from src.utils.logger_utils import logger
 
 # Tenta carregar config de forma segura
 try:
@@ -20,15 +21,24 @@ class DataProcessor:
     """
     Classe responsável pelo processamento e engenharia de dados.
     """
-
     def __init__(self, config):
+        """
+        Inicializa o DataProcessor com o dicionário de configuração.
+        Args:
+            config (dict): Dicionário de configuração carregado do YAML.
+        """
         self.config = config
         self.features_to_use = []
         self.scaler = None
 
     @property
     def map_cols(self):
-        return self.config["mapeamento_colunas"]
+        """
+        Retorna o dicionário de mapeamento de colunas do config.
+        Returns:
+            dict: Mapeamento de colunas.
+        """
+        return self.config['mapeamento_colunas']
 
     @log_execution
     def load_and_standardize(self, filepath):
@@ -36,14 +46,14 @@ class DataProcessor:
         Carrega e padroniza o DataFrame de entrada.
         """
         if filepath.endswith(".parquet"):
-            df = dd.read_parquet(filepath)
+            df = pd.read_parquet(filepath)
         else:
-            df = dd.read_csv(filepath, assume_missing=True)
+            df = pd.read_csv(filepath, low_memory=False)
 
         df = df.rename(columns=self.map_cols)
 
         # Garantir Tipagem
-        df["timestamp"] = dd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
         # Corrigido: usar nome padronizado das colunas, não o mapeamento original
         for col in ["latitude", "longitude"]:
@@ -78,33 +88,17 @@ class DataProcessor:
         df["dia_sem"] = df["timestamp"].dt.dayofweek
 
         # Ciclicidade de hora
-        if hasattr(df, "map_partitions"):
-            df["hora_sin"] = df["hora"].map_partitions(
-                lambda x: np.sin(2 * np.pi * x / 24), meta=("hora", "float64")
-            )
-            df["hora_cos"] = df["hora"].map_partitions(
-                lambda x: np.cos(2 * np.pi * x / 24), meta=("hora", "float64")
-            )
-        else:
-            df["hora_sin"] = np.sin(2 * np.pi * df["hora"] / 24)
-            df["hora_cos"] = np.cos(2 * np.pi * df["hora"] / 24)
+        df["hora_sin"] = np.sin(2 * np.pi * df["hora"] / 24)
+        df["hora_cos"] = np.cos(2 * np.pi * df["hora"] / 24)
 
         self.features_to_use.extend(["hora_sin", "hora_cos", "dia_sem"])
 
         # 2. Features de Contexto (Feriados)
         br_holidays = holidays.BR(state="DF")
 
-        def is_holiday_func(ts_series):
-            return ts_series.dt.date.apply(lambda x: 1 if x in br_holidays else 0)
-
-        if hasattr(df, "map_partitions"):
-            df["eh_feriado"] = df["timestamp"].map_partitions(
-                is_holiday_func, meta=("timestamp", "int64")
-            )
-        else:
-            df["eh_feriado"] = df["timestamp"].dt.date.apply(
-                lambda d: 1 if d in br_holidays else 0
-            )
+        df["eh_feriado"] = df["timestamp"].dt.date.apply(
+            lambda d: 1 if d in br_holidays else 0
+        )
 
         self.features_to_use.append("eh_feriado")
 
@@ -112,21 +106,19 @@ class DataProcessor:
         if "latitude" in df.columns and "longitude" in df.columns:
             # Sort para garantir ordem temporal
             df = df.sort_values(["placa", "timestamp"])
-            
-            # Shift com meta especificado para evitar warnings do Dask
-            df["lat_prev"] = df.groupby("placa")["latitude"].shift(1, meta=("latitude", "float64"))
-            df["lon_prev"] = df.groupby("placa")["longitude"].shift(1, meta=("longitude", "float64"))
-            df["time_prev"] = df.groupby("placa")["timestamp"].shift(1, meta=("timestamp", "datetime64[ns]"))
 
-            # Calcular distância
+            df["lat_prev"] = df.groupby("placa")["latitude"].shift(1)
+            df["lon_prev"] = df.groupby("placa")["longitude"].shift(1)
+            df["time_prev"] = df.groupby("placa")["timestamp"].shift(1)
+
+            # Calcular distância Haversine
             dist = self._haversine_vectorized(
-                df["latitude"], df["longitude"], df["lat_prev"], df["lon_prev"]
+                df["latitude"].values,
+                df["longitude"].values,
+                df["lat_prev"].fillna(df["latitude"]).values,
+                df["lon_prev"].fillna(df["longitude"]).values
             )
-
-            if hasattr(dist, "fillna"):
-                df["dist_m"] = dist.fillna(0)
-            else:
-                df["dist_m"] = da.from_array(np.array(dist), chunks='auto').fillna(0)
+            df["dist_m"] = pd.Series(dist, index=df.index).fillna(0)
 
             # Calcular tempo decorrido
             df["delta_time_s"] = (
@@ -143,7 +135,7 @@ class DataProcessor:
             self.features_to_use.extend(["velocidade_kmh", "dist_m"])
 
             # Aceleração
-            df["vel_prev"] = df.groupby("placa")["velocidade_kmh"].shift(1, meta=("velocidade_kmh", "float64"))
+            df["vel_prev"] = df.groupby("placa")["velocidade_kmh"].shift(1)
             df["aceleracao"] = (
                 (df["velocidade_kmh"] - df["vel_prev"]) * 1000 / 3600
             ) / df["delta_time_s"].replace(0, np.nan)
@@ -157,21 +149,7 @@ class DataProcessor:
 
         # 4. Região Administrativa (COM GET_DUMMIES)
         if "regiao_adm" in df.columns:
-            # Para Dask: precisa categorizar E especificar as categorias conhecidas
-            if hasattr(df, "map_partitions"):
-                # Primeiro, compute as categorias únicas (necessário para Dask)
-                categorias_unicas = df["regiao_adm"].unique().compute()
-                
-                # Converte para categorical com categorias conhecidas
-                df["regiao_adm"] = df["regiao_adm"].astype(
-                    pd.CategoricalDtype(categories=categorias_unicas)
-                )
-                
-                # Agora get_dummies funciona
-                df = dd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
-            else:
-                # Para Pandas (mais simples)
-                df = pd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
+            df = pd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
 
             # Identificar novas colunas criadas
             new_cols = [c for c in df.columns if c.startswith("RA_")]
@@ -183,5 +161,62 @@ class DataProcessor:
             existing_features = [f for f in self.features_to_use if f in df.columns]
             if existing_features:
                 df = df.dropna(subset=existing_features)
+
+        return df
+
+    def fit_scaler(self, df, output_path="outputs/models_saved/scaler.joblib"):
+        """
+        Ajusta o StandardScaler APENAS nos dados de treino e serializa para disco.
+        DEVE ser chamado APENAS com dados de treino (split temporal).
+
+        Args:
+            df (pd.DataFrame): DataFrame de TREINO.
+            output_path (str): Caminho para salvar o scaler.
+        Returns:
+            pd.DataFrame: DataFrame de treino com features normalizadas.
+        """
+        if not self.features_to_use:
+            raise ValueError(
+                "features_to_use está vazio. Execute feature_engineering() primeiro."
+            )
+
+        existing_features = [f for f in self.features_to_use if f in df.columns]
+
+        self.scaler = StandardScaler()
+        df[existing_features] = self.scaler.fit_transform(df[existing_features])
+
+        # Serializar o scaler para garantir consistência na inferência
+        _joblib.dump(self.scaler, output_path)
+        logger.info(
+            f"   ✅ Scaler ajustado em {len(existing_features)} features e salvo em {output_path}"
+        )
+        logger.info(
+            f"   📊 Médias: {dict(zip(existing_features, self.scaler.mean_.round(4)))}"
+        )
+        logger.info(
+            f"   📊 Desvios: {dict(zip(existing_features, self.scaler.scale_.round(4)))}"
+        )
+
+        return df
+
+    def transform_scaler(self, df, scaler_path=None):
+        """
+        Aplica o scaler já ajustado aos dados (teste ou novos dados).
+        Se scaler não estiver carregado, tenta ler do disco.
+
+        Args:
+            df (pd.DataFrame): DataFrame para transformar.
+            scaler_path (str, optional): Caminho do scaler serializado.
+        Returns:
+            pd.DataFrame: DataFrame com features normalizadas.
+        """
+        if self.scaler is None:
+            if scaler_path is None:
+                scaler_path = "outputs/models_saved/scaler.joblib"
+            self.scaler = _joblib.load(scaler_path)
+            logger.info(f"   📂 Scaler carregado de {scaler_path}")
+
+        existing_features = [f for f in self.features_to_use if f in df.columns]
+        df[existing_features] = self.scaler.transform(df[existing_features])
 
         return df

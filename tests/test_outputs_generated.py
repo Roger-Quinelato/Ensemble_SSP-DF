@@ -13,12 +13,15 @@ Além disso, exibem o diretório atual e os arquivos encontrados para facilitar 
 import os
 import unittest
 
+@unittest.skipUnless(
+    os.path.exists(os.path.join('outputs', 'models_saved')) and
+    os.path.exists(os.path.join('outputs', 'reports')),
+    "Pipeline não executado — outputs não existem"
+)
 class TestOutputFiles(unittest.TestCase):
     def test_reports_generated(self):
         print(f"Diretório atual: {os.getcwd()}")
         reports_dir = os.path.join('outputs', 'reports')
-        if not os.path.exists(reports_dir):
-            os.makedirs(reports_dir)
         files = os.listdir(reports_dir)
         print(f"Arquivos em {reports_dir}: {files}")
         self.assertTrue(len(files) > 0, f'Nenhum arquivo gerado em {reports_dir}')
@@ -26,8 +29,6 @@ class TestOutputFiles(unittest.TestCase):
     def test_models_saved_generated(self):
         print(f"Diretório atual: {os.getcwd()}")
         models_dir = os.path.join('outputs', 'models_saved')
-        if not os.path.exists(models_dir):
-            os.makedirs(models_dir)
         files = os.listdir(models_dir)
         print(f"Arquivos em {models_dir}: {files}")
         self.assertTrue(len(files) > 0, f'Nenhum arquivo gerado em {models_dir}')

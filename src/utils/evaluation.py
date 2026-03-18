@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from src.utils.logger_utils import log_execution
+from src.utils.logger_utils import logger
 
 class ThresholdOptimizer:
     """
@@ -15,60 +16,82 @@ class ThresholdOptimizer:
         Args:
             percentiles (list, opcional): Lista de percentis para testar. Se None, usa padrão.
         """
-        # Padrão: ISO = 200, LOF = 20, mas permite variantes
+        # Padrão: ISO = 200, HBOS = 20, mas permite variantes
         if percentiles is None:
             self.percentiles = sorted([90, 95, 99, 200, 20])
         else:
             self.percentiles = sorted(percentiles)
         
-    def apply_dynamic_thresholds(self, df, score_col, model_name):
+    def apply_dynamic_thresholds(self, df, score_col, model_name, calibration_scores=None):
         """
-        Calcula múltiplos thresholds baseados em percentis e cria labels para cada variação.
-        Suporta Dask DataFrame.
+        Calcula múltiplos thresholds baseados em percentis e cria labels.
+
         Args:
-            df (pd.DataFrame ou dask.dataframe.DataFrame): DataFrame com os scores.
-            score_col (str): Nome da coluna com scores brutos.
-            model_name (str): Nome do modelo (para nomear colunas de output).
+            df: DataFrame com os scores.
+            score_col: Nome da coluna com scores brutos.
+            model_name: Nome do modelo.
+            calibration_scores (np.ndarray, optional): Se fornecido, os thresholds
+                são calculados nestes scores (tipicamente do split de treino) em vez
+                dos scores do DataFrame completo. Isso evita data leakage.
         Returns:
-            tuple: (DataFrame atualizado, lista de dicts com estatísticas por percentil)
+            tuple: (DataFrame atualizado, lista de dicts com estatísticas)
         """
-        """
-        Calcula múltiplos thresholds baseados em percentis e cria labels para cada variação.
-        Suporta Dask DataFrame.
-        """
-        import dask.dataframe as dd
         if score_col not in df.columns:
             raise ValueError(f"❌ Coluna '{score_col}' não encontrada no DataFrame")
-        # Se for Dask, converte para pandas para cálculo de percentis
-        if isinstance(df, dd.DataFrame):
-            scores = df[score_col].dropna().compute().values
+
+        # Scores para APLICAR labels (dataset completo)
+        all_scores = df[score_col].dropna().values
+
+        # Scores para CALIBRAR thresholds (treino ou completo se não especificado)
+        if calibration_scores is not None:
+            cal_scores = calibration_scores[~np.isnan(calibration_scores)]
+            logger.info(f"📊 Thresholds calibrados no TREINO para {model_name}:")
+            logger.info(
+                f"   Calibração: {len(cal_scores):,} scores | Aplicação: {len(all_scores):,} scores"
+            )
         else:
-            scores = df[score_col].dropna().values
-        if len(scores) == 0:
-            print(f"   ⚠️ Nenhum score válido para {model_name}")
+            cal_scores = all_scores
+            logger.info(f"📊 Testando percentis para {model_name} (sem split):")
+
+        if len(cal_scores) == 0:
+            logger.warning(f"Nenhum score válido para calibração de {model_name}")
             return df, []
+
+        if len(all_scores) == 0:
+            logger.warning(f"Nenhum score válido para aplicação de {model_name}")
+            return df, []
+
+        logger.info(
+            f"Score range (calibração): [{cal_scores.min():.4f}, {cal_scores.max():.4f}]"
+        )
+        logger.info(
+            f"Score range (aplicação):  [{all_scores.min():.4f}, {all_scores.max():.4f}]"
+        )
+
         results = []
-        print(f"\n   📊 Testando percentis para {model_name}:")
-        print(f"   Score range: [{scores.min():.4f}, {scores.max():.4f}")
         for p in self.percentiles:
-            thresh = np.percentile(scores, p)
+            # Threshold calculado nos dados de CALIBRAÇÃO (treino)
+            thresh = np.percentile(cal_scores, p)
+
             col_name = f"{model_name}_p{p}_label"
+            # Labels aplicados no dataset COMPLETO
             df[col_name] = (df[score_col] >= thresh).astype(int)
-            if isinstance(df, dd.DataFrame):
-                n_anomalies = df[col_name].sum().compute()
-                total_len = len(df)
-            else:
-                n_anomalies = df[col_name].sum()
-                total_len = len(df)
+
+            n_anomalies = df[col_name].sum()
+            total_len = len(df)
+
             pct_anomalies = (n_anomalies / total_len) * 100
             results.append({
                 'Model': model_name,
                 'Percentile': p,
                 'Threshold_Value': round(thresh, 6),
                 'Anomalies_Detected': int(n_anomalies),
-                'Pct_Dataset': round(pct_anomalies, 2)
+                'Pct_Dataset': round(pct_anomalies, 2),
+                'Calibrated_On': 'train' if calibration_scores is not None else 'full',
             })
-            print(f"      P{p}: threshold={thresh:.4f} → {n_anomalies:,} anomalias ({pct_anomalies:.2f}%)")
+            logger.info(
+                f"   P{p}: threshold={thresh:.4f} → {n_anomalies:,} anomalias ({pct_anomalies:.2f}%)"
+            )
         return df, results
 
 
@@ -79,15 +102,6 @@ class GroundTruthComparator:
     """
     @staticmethod
     def compute_metrics(y_true, y_pred, model_name):
-        """
-        Calcula métricas de classificação (Precision, Recall, F1, Accuracy) para um modelo.
-        Args:
-            y_true (np.ndarray): Array binário (ground truth).
-            y_pred (np.ndarray): Array binário (predições).
-            model_name (str): Nome do modelo.
-        Returns:
-            dict: Métricas calculadas.
-        """
         """
         Calcula métricas de classificação (Precision, Recall, F1, Accuracy) para um modelo.
         Args:
@@ -124,20 +138,11 @@ class GroundTruthComparator:
         Returns:
             pd.DataFrame: DataFrame com métricas de todos os modelos.
         """
-        """
-        Compara múltiplos modelos contra um ground truth e retorna métricas de todos.
-        Args:
-            df (pd.DataFrame): DataFrame com todas as colunas.
-            ground_truth_col (str): Nome da coluna de GT.
-            label_cols (list): Lista de colunas de predições para comparar.
-        Returns:
-            pd.DataFrame: DataFrame com métricas de todos os modelos.
-        """
         results = []
         
         for col in label_cols:
             if col not in df.columns:
-                print(f"   ⚠️ Coluna {col} não encontrada, pulando...")
+                logger.warning(f"Coluna {col} não encontrada, pulando...")
                 continue
             
             metrics = GroundTruthComparator.compute_metrics(
