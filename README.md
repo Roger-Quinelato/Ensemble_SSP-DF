@@ -128,12 +128,12 @@ Ensemble_SSP-DF/
 |---|---|
 | `outputs/metrics/iso_metrics.csv` | Métricas de thresholds do Isolation Forest |
 | `outputs/metrics/hbos_metrics.csv` | Métricas de thresholds do HBOS |
-| `outputs/metrics/lstm_metrics.csv` | Métricas de thresholds dos modelos temporais |
-| `outputs/metrics/comparativo_completo.csv` | Comparativo de modelos vs GT de referência |
+| `outputs/metrics/temporal_metrics.csv` | Métricas de thresholds dos modelos temporais |
+| `outputs/metrics/concordancia_modelos.csv` | Concordância entre modelos (não é validação) |
 | `outputs/metrics/perfil_dados.json` | Perfil estatístico da base |
 | `outputs/metrics/iso_results.csv` | Scores/labels ISO |
 | `outputs/metrics/hbos_results.csv` | Scores/labels HBOS |
-| `outputs/metrics/lstm_results.csv` | Scores/labels temporais |
+| `outputs/metrics/temporal_results.csv` | Scores/labels temporais |
 | `outputs/master_table/resultado_final.parquet` | Tabela consolidada final |
 | `outputs/models_saved/*.joblib` | Modelos ISO/HBOS + scaler |
 | `outputs/models_saved/*.h5` | Modelos temporais |

@@ -11,7 +11,8 @@ import json
 from src.utils.logger_utils import logger
 
 # Diretórios
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Raiz do repositório (.. / src / utils / organizacao_arquivos.py -> .. .. ..)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 INPUT_DIR = os.path.join(BASE_DIR, 'data', 'input')
 REPORTS_DIR = os.path.join(BASE_DIR, 'outputs', 'reports')
 IMG_DIR = os.path.join(BASE_DIR, 'outputs', 'imagens')
@@ -32,8 +33,8 @@ def compilar_descricoes():
             families.setdefault('ISO', []).append(f)
         elif 'HBOS' in fname:
             families.setdefault('HBOS', []).append(f)
-        elif 'LSTM' in fname:
-            families.setdefault('LSTM', []).append(f)
+        elif 'Temporal' in fname:
+            families.setdefault('Temporal', []).append(f)
         # Adicione outras famílias se necessário
     for fam, files in families.items():
         dfs = [pd.read_csv(f) for f in files]
@@ -46,7 +47,7 @@ def mover_arquivos_finais():
     final_files = [
         'iso_metrics.csv', 'iso_results.csv',
         'hbos_metrics.csv', 'hbos_results.csv',
-        'lstm_metrics.csv', 'lstm_results.csv'
+        'temporal_metrics.csv', 'temporal_results.csv'
     ]
     for fname in final_files:
         src = os.path.join(BASE_DIR, fname)

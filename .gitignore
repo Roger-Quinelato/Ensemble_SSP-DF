@@ -3,17 +3,26 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
 
 # Dados e Outputs (Importante!)
 data/input/*
 !data/input/.gitkeep
-outputs/*
+outputs*/
 !outputs/.gitkeep
+
+# MLflow Tracking
+mlruns/
+mlruns.db
 
 # Logs
 *.log
 
-# Cursor/VSCode
+# Ferramentas, Agentes e IAs (Codex, Antigravity, VSCode)
 .vscode/
 ! .vscode/settings.json
 ! .vscode/launch.json
+.cursor/
+.cursorrules
+.gemini/

@@ -14,14 +14,20 @@ class ThresholdOptimizer:
         """
         Inicializa o otimizador de thresholds para detecção de anomalias.
         Args:
-            percentiles (list, opcional): Lista de percentis para testar. Se None, usa padrão.
+            percentiles (list, opcional): Lista de percentis (0-100). Default: [90, 95, 99].
         """
-        # Padrão: ISO = 200, HBOS = 20, mas permite variantes
         if percentiles is None:
-            self.percentiles = sorted([90, 95, 99, 200, 20])
+            self.percentiles = [90, 95, 99]
         else:
             self.percentiles = sorted(percentiles)
-        
+
+        # Validar range
+        for p in self.percentiles:
+            if not 0 <= p <= 100:
+                raise ValueError(
+                    f"Percentil inválido: {p}. Todos devem estar entre 0 e 100."
+                )
+
     def apply_dynamic_thresholds(self, df, score_col, model_name, calibration_scores=None):
         """
         Calcula múltiplos thresholds baseados em percentis e cria labels.
@@ -95,61 +101,61 @@ class ThresholdOptimizer:
         return df, results
 
 
-class GroundTruthComparator:
+class ModelConcordanceAnalyzer:
     """
-    Compara predições dos modelos contra ground truths (União e Interseção).
-    Calcula métricas de classificação.
+    Analisa concordancia entre modelos de deteccao de anomalias.
+
+    IMPORTANTE: Estas metricas medem CONCORDANCIA entre modelos,
+    NAO performance contra ground truth real. Sem anotacao humana
+    ou validacao externa, nao e possivel medir Precision/Recall reais.
     """
+
     @staticmethod
-    def compute_metrics(y_true, y_pred, model_name):
-        """
-        Calcula métricas de classificação (Precision, Recall, F1, Accuracy) para um modelo.
-        Args:
-            y_true (np.ndarray): Array binário (ground truth).
-            y_pred (np.ndarray): Array binário (predições).
-            model_name (str): Nome do modelo.
-        Returns:
-            dict: Métricas calculadas.
-        """
-        from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
-        
-        # Evitar divisão por zero
-        precision = precision_score(y_true, y_pred, zero_division=0)
-        recall = recall_score(y_true, y_pred, zero_division=0)
-        f1 = f1_score(y_true, y_pred, zero_division=0)
-        accuracy = accuracy_score(y_true, y_pred)
-        
-        return {
-            'Model': model_name,
-            'Precision': round(precision, 4),
-            'Recall': round(recall, 4),
-            'F1_Score': round(f1, 4),
-            'Accuracy': round(accuracy, 4)
-        }
-    
+    def pairwise_agreement(y_a, y_b):
+        """Calcula taxa de concordancia entre dois arrays binarios."""
+        agreement = np.mean(y_a == y_b)
+        both_anomaly = np.sum((y_a == 1) & (y_b == 1))
+        either_anomaly = np.sum((y_a == 1) | (y_b == 1))
+        jaccard = both_anomaly / either_anomaly if either_anomaly > 0 else 0.0
+        return agreement, jaccard
+
     @staticmethod
-    def compare_all_models(df, ground_truth_col, label_cols):
+    def analyze_concordance(df, label_cols):
         """
-        Compara múltiplos modelos contra um ground truth e retorna métricas de todos.
+        Calcula concordancia par-a-par entre todos os modelos.
+
         Args:
-            df (pd.DataFrame): DataFrame com todas as colunas.
-            ground_truth_col (str): Nome da coluna de GT.
-            label_cols (list): Lista de colunas de predições para comparar.
+            df: DataFrame com colunas de labels binarios.
+            label_cols: Lista de colunas de labels para comparar.
         Returns:
-            pd.DataFrame: DataFrame com métricas de todos os modelos.
+            pd.DataFrame com Agreement e Jaccard para cada par.
         """
         results = []
-        
-        for col in label_cols:
-            if col not in df.columns:
-                logger.warning(f"Coluna {col} não encontrada, pulando...")
-                continue
-            
-            metrics = GroundTruthComparator.compute_metrics(
-                df[ground_truth_col].values,
-                df[col].values,
-                model_name=col
-            )
-            results.append(metrics)
-        
+        valid_cols = [c for c in label_cols if c in df.columns]
+
+        for i, col_a in enumerate(valid_cols):
+            for col_b in valid_cols[i + 1:]:
+                mask = df[[col_a, col_b]].notna().all(axis=1)
+                if mask.sum() == 0:
+                    continue
+                y_a = df.loc[mask, col_a].astype(int).values
+                y_b = df.loc[mask, col_b].astype(int).values
+                agreement, jaccard = ModelConcordanceAnalyzer.pairwise_agreement(
+                    y_a, y_b
+                )
+                n_a = int(y_a.sum())
+                n_b = int(y_b.sum())
+                results.append(
+                    {
+                        "Model_A": col_a,
+                        "Model_B": col_b,
+                        "Agreement": round(agreement, 4),
+                        "Jaccard_Anomalies": round(jaccard, 4),
+                        "Anomalies_A": n_a,
+                        "Anomalies_B": n_b,
+                        "N_Samples": int(mask.sum()),
+                        "Type": "CONCORDANCE (not validation)",
+                    }
+                )
+
         return pd.DataFrame(results)

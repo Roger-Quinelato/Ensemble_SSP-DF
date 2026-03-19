@@ -50,14 +50,12 @@ FEATURES_HBOS = [
     # Espacial: Continuidade GPS
     'dist_m',              # Distribuição: exponencial (maioria < 500m)
     
-    # Temporal: Padrão de atividade
-    'hora',                # Substituído sin/cos - histograma mostra picos claros
+    # Temporal: Padrão de atividade (cíclico, normalizado pelo scaler)
+    'hora_sin',            # Captura ciclicidade (23h→0h)
+    'hora_cos',            # Complementa hora_sin para posição circular
     'dia_sem',             # Discreta - padrão de atividade por dia da semana
     'eh_feriado',          # Binária - contexto excepcional
     
-    # Espacial agregado (SE DISPONÍVEL - criar no feature engineering)
-    # 'densidade_trafego_regiao',  # Contínua: veículos/hora na RA
-    # 'distancia_centro_km',        # Contínua: distância do Plano Piloto
 ]
 
 # =============================================================================
@@ -145,9 +143,7 @@ LSTM_CONFIG = {
 # Features que NÃO devem ser usadas por modelo específico
 
 EXCLUDE_HBOS = [
-    'hora_sin',      # Substituído por 'hora' direta
-    'hora_cos',      # Substituído por 'hora' direta
-    # Todas as RA_* serão excluídas automaticamente
+    # Sem exclusões: hora_sin e hora_cos agora são usados diretamente
 ]
 
 EXCLUDE_ISOLATION_FOREST = [
@@ -232,7 +228,7 @@ def get_feature_importance_order(model_name):
         ],
         'hbos': [
             'velocidade_kmh', 'aceleracao', 'dist_m',
-            'hora', 'dia_sem', 'eh_feriado'
+            'hora_sin', 'hora_cos', 'dia_sem', 'eh_feriado'
         ],
         'gru': [
             'velocidade_kmh', 'aceleracao', 'latitude', 'longitude',

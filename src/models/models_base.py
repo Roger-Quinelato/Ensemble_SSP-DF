@@ -7,14 +7,16 @@ from src.utils.logger_utils import log_execution
 
 
 class BaselineModels:
-    def __init__(self, X_data):
+    def __init__(self, X_data, random_state=None):
         """
         Inicializa o BaselineModels com os dados de entrada.
         Args:
             X_data (np.ndarray ou pandas.DataFrame): Dados normalizados.
+            random_state (int): Seed para reprodutibilidade.
         """
         self.X = X_data if isinstance(X_data, np.ndarray) else X_data.values
-        
+        self.random_state = 42 if random_state is None else random_state
+
     @log_execution
     def train_iso(self, n_estimators=100, contamination='auto'):
         """
@@ -26,22 +28,21 @@ class BaselineModels:
             tuple: (labels, scores, modelo treinado)
         """
         model = IsolationForest(
-            n_estimators=n_estimators, 
-            contamination=contamination, 
-            n_jobs=-1, 
-            random_state=42
+            n_estimators=n_estimators,
+            contamination=contamination,
+            n_jobs=-1,
+            random_state=self.random_state,
         )
         model.fit(self.X)
         preds = model.predict(self.X)
         scores = model.score_samples(self.X)
-        # 1: Normal, -1: Anomalia -> Converter para 0: Normal, 1: Anomalia
         labels = np.where(preds == -1, 1, 0)
         return labels, scores, model
 
     @log_execution
     def train_hbos(self, n_bins=10, contamination=0.1):
         """
-        Treina o modelo Histogram-Based Outlier Score (HBOS) para detecção de anomalias.
+        Treina o modelo HBOS para detecção de anomalias.
         Args:
             n_bins (int): Número de bins do histograma.
             contamination (float): Proporção de anomalias.
@@ -52,5 +53,4 @@ class BaselineModels:
         model.fit(self.X)
         scores = model.decision_scores_
         labels = model.labels_
-        # Converter labels: 0 = Normal, 1 = Anomalia (HBOS já retorna assim)
         return labels, scores, model

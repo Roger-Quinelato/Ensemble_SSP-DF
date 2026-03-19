@@ -9,7 +9,7 @@ def test_pipeline_flow():
     run_experiment()
     assert os.path.exists('outputs/master_table/resultado_final.parquet'), "Arquivo de saída principal não gerado."
     assert os.path.exists('outputs/metrics/perfil_dados.json'), "Arquivo de perfil de dados não gerado."
-    assert os.path.exists('outputs/metrics/comparativo_completo.csv'), "Arquivo de comparativo não gerado."
+    assert os.path.exists('outputs/metrics/concordancia_modelos.csv'), "Arquivo de concordância não gerado."
 
 if __name__ == "__main__":
     test_pipeline_flow()

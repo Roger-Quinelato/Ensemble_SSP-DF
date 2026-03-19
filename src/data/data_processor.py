@@ -2,20 +2,12 @@
 
 import pandas as pd
 import numpy as np
-import yaml
 import holidays
 from sklearn.preprocessing import StandardScaler
 import joblib as _joblib
+from src.data.schema import validate_input
 from src.utils.logger_utils import log_execution
 from src.utils.logger_utils import logger
-
-# Tenta carregar config de forma segura
-try:
-    with open("config_mapeamento.yaml", "r") as config_file:
-        CONFIG = yaml.safe_load(config_file)
-except Exception:
-    CONFIG = {}
-
 
 class DataProcessor:
     """
@@ -52,15 +44,26 @@ class DataProcessor:
 
         df = df.rename(columns=self.map_cols)
 
-        # Garantir Tipagem
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # Garantir tipagem quando a coluna existir
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
         # Corrigido: usar nome padronizado das colunas, não o mapeamento original
         for col in ["latitude", "longitude"]:
             if col in df.columns:
                 df[col] = df[col].astype(float)
 
-        df = df.dropna(subset=["timestamp", "placa"])
+        if {"timestamp", "placa"}.issubset(df.columns):
+            df = df.dropna(subset=["timestamp", "placa"])
+
+        # Validar schema de entrada
+        try:
+            df = validate_input(df)
+            logger.info("✅ Schema de entrada validado com sucesso")
+        except Exception as e:
+            logger.error(f"❌ Falha na validação de schema: {e}")
+            logger.error("Verifique se os dados de entrada seguem o formato esperado.")
+            raise
 
         return df
 

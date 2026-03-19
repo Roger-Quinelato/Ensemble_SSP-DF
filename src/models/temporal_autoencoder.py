@@ -30,6 +30,7 @@ class TemporalAutoencoder:
         window_size=5,
         max_gap_seconds=600,
         arch_type="gru",
+        arch_config=None,
     ):
         """
         Args:
@@ -53,6 +54,17 @@ class TemporalAutoencoder:
         self.window_size = window_size
         self.max_gap_seconds = max_gap_seconds
         self.arch_type = arch_type
+        # Configuração da arquitetura (com defaults)
+        default_config = {
+            "encoder_units": [2**5, 2**4],
+            "decoder_units": [2**4, 2**5],
+            "dropout": 0.2,
+            "optimizer": "adam",
+            "loss": "mse",
+        }
+        if arch_config is not None:
+            default_config.update(arch_config)
+        self.arch_config = default_config
         self.model = None
         self._cached_sequences = None
         self._cached_indices = None
@@ -118,37 +130,57 @@ class TemporalAutoencoder:
         return self._cached_sequences, self._cached_indices
 
     def _build_model(self, n_features):
-        """
-        Constrói o autoencoder com a arquitetura selecionada (GRU ou LSTM).
-        """
+        """Constrói o autoencoder com a arquitetura configurável."""
         layer = self._LayerClass
         arch = self.arch_type.upper()
+        cfg = self.arch_config
 
-        model = keras.Sequential([
-            layer(
-                32,
-                activation="tanh",
-                input_shape=(self.window_size, n_features),
-                return_sequences=True,
-                name=f"encoder_{arch}1",
-            ),
-            keras.layers.Dropout(0.2, name="encoder_dropout"),
-            layer(
-                16,
-                activation="tanh",
-                return_sequences=False,
-                name=f"encoder_{arch}2_bottleneck",
-            ),
-            keras.layers.RepeatVector(self.window_size, name="repeat"),
-            layer(16, activation="tanh", return_sequences=True, name=f"decoder_{arch}1"),
-            keras.layers.Dropout(0.2, name="decoder_dropout"),
-            layer(32, activation="tanh", return_sequences=True, name=f"decoder_{arch}2"),
+        enc_units = cfg["encoder_units"]
+        dec_units = cfg["decoder_units"]
+        dropout = cfg["dropout"]
+
+        layers = []
+
+        # Encoder
+        for i, units in enumerate(enc_units):
+            is_last = i == len(enc_units) - 1
+            layer_kwargs = {
+                "activation": "tanh",
+                "return_sequences": not is_last,
+                "name": f"encoder_{arch}{i+1}" + ("_bottleneck" if is_last else ""),
+            }
+            if i == 0:
+                layer_kwargs["input_shape"] = (self.window_size, n_features)
+            layers.append(layer(units, **layer_kwargs))
+            if i < len(enc_units) - 1:
+                layers.append(keras.layers.Dropout(dropout, name=f"encoder_dropout_{i+1}"))
+
+        # Bridge
+        layers.append(keras.layers.RepeatVector(self.window_size, name="repeat"))
+
+        # Decoder
+        for i, units in enumerate(dec_units):
+            layers.append(
+                layer(
+                    units,
+                    activation="tanh",
+                    return_sequences=True,
+                    name=f"decoder_{arch}{i+1}",
+                )
+            )
+            if i < len(dec_units) - 1:
+                layers.append(keras.layers.Dropout(dropout, name=f"decoder_dropout_{i+1}"))
+
+        # Output
+        layers.append(
             keras.layers.TimeDistributed(
                 keras.layers.Dense(n_features, activation=None),
                 name="output",
-            ),
-        ])
-        model.compile(optimizer="adam", loss="mse")
+            )
+        )
+
+        model = keras.Sequential(layers)
+        model.compile(optimizer=cfg["optimizer"], loss=cfg["loss"])
         return model
 
     @log_execution
@@ -201,8 +233,3 @@ class TemporalAutoencoder:
         mse_sequences = np.mean(np.power(x_seq_all - x_pred, 2), axis=(1, 2))
 
         return mse_sequences, indices_all, self.model
-
-
-# Aliases para compatibilidade retroativa
-LSTMPipeline = TemporalAutoencoder
-GRUPipeline = TemporalAutoencoder

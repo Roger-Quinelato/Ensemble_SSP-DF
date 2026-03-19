@@ -46,7 +46,7 @@ def parse_args():
         "--epochs",
         type=int,
         default=5,
-        help="Numero de epocas para treino dos modelos temporais (LSTM/GRU)",
+        help="Numero de epocas para treino dos modelos temporais (GRU)",
     )
     parser.add_argument(
         "--seed",
@@ -71,6 +71,10 @@ def set_global_seed(seed):
 
 def main():
     args = parse_args()
+    if args.verbose:
+        import logging
+
+        logging.getLogger("sspdf").setLevel(logging.DEBUG)
     set_global_seed(args.seed)
 
     # Importar TensorFlow DEPOIS de definir variaveis de ambiente e seeds.
