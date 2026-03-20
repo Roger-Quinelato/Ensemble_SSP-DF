@@ -6,18 +6,34 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Dados e Outputs (Importante!)
+# =============================================================================
+# Outputs — REGRA: Todo output deve estar DENTRO de outputs/ ou outputs_<nome>/
+# Jamais criar pastas de resultado na raiz do projeto.
+# O padrão outputs*/ cobre outputs/, outputs_teste/, outputs_cli/, etc.
+# =============================================================================
 data/input/*
 !data/input/.gitkeep
+
+# Pastas de output (raiz do projeto)
 outputs*/
 !outputs/.gitkeep
+
+# Pastas de inferência e CI (geradas por inference.py e smoke tests)
+outputs_inference*/
+outputs_ci*/
 
 # MLflow Tracking
 mlruns/
 mlruns.db
+mlartifacts/
 
 # Logs
 *.log
+
+# Parquet e modelos gerados (pesados, não versionados)
+*.parquet
+*.h5
+*.joblib
 
 # Ferramentas, Agentes e IAs (Codex, Antigravity, VSCode)
 .vscode/

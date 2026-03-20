@@ -25,6 +25,7 @@ def test_feature_engineering():
         config = yaml.safe_load(f)
     proc = DataProcessor(config)
     df = proc.load_and_standardize('data/input/amostra_ssp.csv')
-    df_feat = proc.feature_engineering(df)
+    df_feat, features = proc.feature_engineering(df)
     assert 'hora_sin' in df_feat.columns
     assert 'velocidade_kmh' in df_feat.columns
+    assert 'hora_sin' in features

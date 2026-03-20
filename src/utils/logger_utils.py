@@ -9,47 +9,70 @@ _LOG_DIR = os.environ.get("SSPDF_LOG_DIR", "outputs/logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "execution.log")
 
 
-def _ensure_log_dir():
-    """Cria diretorio de logs sob demanda (nao no import)."""
-    os.makedirs(_LOG_DIR, exist_ok=True)
+def _default_log_file(run_id=None):
+    """Monta caminho padrao do log considerando run_id."""
+    log_dir = os.environ.get("SSPDF_LOG_DIR", "outputs/logs")
+    if run_id:
+        return os.path.join(log_dir, f"execution_{run_id}.log")
+    return os.path.join(log_dir, "execution.log")
 
 
-def setup_logger(name="sspdf", log_file=None, level=logging.INFO):
+def _ensure_log_dir(log_file):
+    """Cria diretorio do arquivo de log sob demanda (nao no import)."""
+    os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+
+
+def _clear_handlers(logger):
+    """Remove e fecha handlers para permitir reconfiguracao segura."""
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
+def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
     """
-    Configura logger com output DUAL: arquivo + console.
-    O diretorio de logs e criado apenas quando o logger e configurado,
-    nao no momento do import.
+    Configura logger com output DUAL: arquivo por run + console.
 
     Args:
         name: Nome do logger.
-        log_file: Caminho do arquivo de log. Se None, usa default.
+        log_file: Caminho do arquivo de log. Se None, usa default baseado em run_id.
         level: Nivel de logging.
+        run_id: Identificador da execucao para nomear o arquivo de log.
     Returns:
         logging.Logger configurado.
     """
     if log_file is None:
-        log_file = _LOG_FILE
+        log_file = _default_log_file(run_id=run_id)
+
+    default_run_log = _default_log_file(run_id=run_id)
+    file_paths = [log_file]
+    if os.path.abspath(default_run_log) != os.path.abspath(log_file):
+        file_paths.append(default_run_log)
 
     logger = logging.getLogger(name)
 
-    # Evitar duplicar handlers se chamado multiplas vezes
+    # Evitar duplicacao; quando solicitado log por run/log_file especifico, reconfigura.
     if logger.handlers:
-        return logger
-
-    # Criar diretorio de logs sob demanda
-    _ensure_log_dir()
+        if run_id is None and log_file == _LOG_FILE:
+            return logger
+        _clear_handlers(logger)
 
     logger.setLevel(level)
-    formatter = logging.Formatter(
+    formatter_txt = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Handler: Arquivo
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    # Handler: Arquivo(s)
+    for path in file_paths:
+        _ensure_log_dir(path)
+        file_handler = logging.FileHandler(path, encoding="utf-8")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter_txt)
+        logger.addHandler(file_handler)
 
     # Handler: Console (stdout)
     console_handler = logging.StreamHandler()
@@ -62,9 +85,6 @@ def setup_logger(name="sspdf", log_file=None, level=logging.INFO):
 
 
 # Logger global do projeto
-# NOTA: setup_logger() agora cria o diretorio sob demanda na primeira chamada,
-# nao no import. Porem, como este modulo e importado antes do main, o diretorio
-# sera criado na inicializacao do logger.
 logger = setup_logger()
 
 

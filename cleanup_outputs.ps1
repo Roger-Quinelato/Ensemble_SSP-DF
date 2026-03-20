@@ -1,0 +1,63 @@
+# cleanup_outputs.ps1
+# Mantém apenas as N runs mais recentes dentro de outputs/
+# e deleta qualquer pasta outputs_* na raiz do projeto.
+#
+# Uso:
+#   .\cleanup_outputs.ps1            → mantém as 3 últimas runs
+#   .\cleanup_outputs.ps1 -Keep 5   → mantém as 5 últimas runs
+#   .\cleanup_outputs.ps1 -DryRun   → mostra o que seria deletado sem deletar
+
+param(
+    [int]$Keep = 3,
+    [switch]$DryRun
+)
+
+$root = Split-Path $MyInvocation.MyCommand.Path
+
+Write-Host "=== SSP-DF Cleanup de Outputs ===" -ForegroundColor Cyan
+
+# 1. Deletar pastas outputs_* na RAIZ (geradas por testes ad-hoc do Codex)
+$stray = Get-ChildItem $root -Directory | Where-Object { $_.Name -like "outputs_*" }
+if ($stray.Count -gt 0) {
+    Write-Host "`n[Raiz] Pastas outputs_* encontradas: $($stray.Count)" -ForegroundColor Yellow
+    $stray | ForEach-Object {
+        if ($DryRun) {
+            Write-Host "  [DRY-RUN] Deletaria: $($_.Name)"
+        } else {
+            Remove-Item $_.FullName -Recurse -Force
+            Write-Host "  Deletado: $($_.Name)" -ForegroundColor Red
+        }
+    }
+} else {
+    Write-Host "`n[Raiz] Nenhuma pasta outputs_* encontrada. OK." -ForegroundColor Green
+}
+
+# 2. Dentro de outputs/, manter apenas as N runs mais recentes
+$outputsDir = Join-Path $root "outputs"
+if (Test-Path $outputsDir) {
+    # Subpastas com formato de run_id (YYYYMMDD_HHMMSS)
+    $runs = Get-ChildItem $outputsDir -Directory |
+            Where-Object { $_.Name -match "^\d{8}_\d{6}$" } |
+            Sort-Object LastWriteTime -Descending
+
+    $toDelete = $runs | Select-Object -Skip $Keep
+
+    if ($toDelete.Count -gt 0) {
+        Write-Host "`n[outputs/] Runs antigas a deletar ($($toDelete.Count) de $($runs.Count)):" -ForegroundColor Yellow
+        $toDelete | ForEach-Object {
+            if ($DryRun) {
+                Write-Host "  [DRY-RUN] Deletaria run: $($_.Name)"
+            } else {
+                Remove-Item $_.FullName -Recurse -Force
+                Write-Host "  Deletado run: $($_.Name)" -ForegroundColor Red
+            }
+        }
+        Write-Host "  Mantidos: $Keep runs mais recentes." -ForegroundColor Green
+    } else {
+        Write-Host "`n[outputs/] $($runs.Count) runs encontradas — dentro do limite de $Keep. OK." -ForegroundColor Green
+    }
+} else {
+    Write-Host "`n[outputs/] Pasta outputs/ não encontrada." -ForegroundColor Gray
+}
+
+Write-Host "`nConcluído.$(if ($DryRun) { ' (DRY-RUN — nada foi deletado)' })" -ForegroundColor Cyan

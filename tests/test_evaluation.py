@@ -29,3 +29,20 @@ def test_analyze_concordance():
     )
     assert "Agreement" in metrics_df.columns
     assert "Jaccard_Anomalies" in metrics_df.columns
+
+
+def test_nan_score_produces_nan_label():
+    """Registros sem score NÃO devem receber label 0 (normal)."""
+    df = pd.DataFrame({"model_score": [0.1, 0.9, np.nan, 0.5, np.nan]})
+    optimizer = ThresholdOptimizer(percentiles=[50])
+    df_result, _ = optimizer.apply_dynamic_thresholds(
+        df, "model_score", "test_model", calibration_scores=np.array([0.1, 0.9, 0.5])
+    )
+    # NaN scores devem permanecer NaN no label
+    assert df_result["test_model_p50_label"].isna().sum() == 2, (
+        "Registros com score NaN devem ter label NaN, NÃO 0"
+    )
+    # Scores válidos devem ter label 0 ou 1
+    assert df_result["test_model_p50_label"].dropna().isin([0.0, 1.0]).all(), (
+        "Labels de registros avaliados devem ser 0.0 ou 1.0"
+    )

@@ -34,28 +34,34 @@ FEATURES_ISOLATION_FOREST = [
 # =============================================================================
 # FEATURES PARA HBOS (Histogram-Based Outlier Score)
 # =============================================================================
-# HBOS assume independência entre features e usa histogramas univariados.
-# Funciona melhor com:
-# - Poucas features (5-10 idealmente)
-# - Features contínuas com distribuições claras
-# - Features independentes entre si
-# - Sem one-hot encoding (cria bins esparsos)
-# Estratégia: Features SELECIONADAS e de alta qualidade
+# HBOS assume INDEPENDENCIA entre features (escore = produto de densidades).
+# REGRAS:
+# 1. Nao incluir features correlacionadas (violam a premissa de independencia).
+# 2. Nao incluir one-hot encoding (bins esparsos em histograma univariado).
+# 3. Maximo de 8-10 features (mais nao melhora e adiciona ruido).
+#
+# EXCLUIDAS INTENCIONALMENTE (apesar de relevantes):
+# - 'aceleracao': derivada de velocidade_kmh -> correlacao estrutural (delta_v/delta_t)
+# - 'dist_m': proporcional a velocidade x delta_t -> correlacao estrutural
+# - 'RA_*': one-hot encoding cria histogramas esparsos
+#
+# INCLUIDAS:
+# - 'velocidade_kmh': principal sinal de comportamento dinamico
+# - 'hora_sin', 'hora_cos': padrao temporal ciclico (independente de velocidade)
+# - 'dia_sem': padrao semanal (independente de velocidade)
+# - 'eh_feriado': contexto de excecao (independente de velocidade)
 
 FEATURES_HBOS = [
-    # Core: Comportamento dinâmico (MAIS IMPORTANTE)
-    'velocidade_kmh',      # Distribuição: normal com caudas longas
-    'aceleracao',          # Distribuição: bimodal (aceleração/frenagem)
-    
-    # Espacial: Continuidade GPS
-    'dist_m',              # Distribuição: exponencial (maioria < 500m)
-    
-    # Temporal: Padrão de atividade (cíclico, normalizado pelo scaler)
-    'hora_sin',            # Captura ciclicidade (23h→0h)
-    'hora_cos',            # Complementa hora_sin para posição circular
-    'dia_sem',             # Discreta - padrão de atividade por dia da semana
-    'eh_feriado',          # Binária - contexto excepcional
-    
+    # === DINAMICA DE MOVIMENTO ===
+    # Manter apenas velocidade: feature mais direta e interpretavel
+    'velocidade_kmh',
+
+    # === CONTEXTO TEMPORAL ===
+    # Independentes da velocidade
+    'hora_sin',
+    'hora_cos',
+    'dia_sem',
+    'eh_feriado',
 ]
 
 # =============================================================================
@@ -227,8 +233,7 @@ def get_feature_importance_order(model_name):
             'hora_sin', 'hora_cos', 'eh_feriado', 'dia_sem'
         ],
         'hbos': [
-            'velocidade_kmh', 'aceleracao', 'dist_m',
-            'hora_sin', 'hora_cos', 'dia_sem', 'eh_feriado'
+            'velocidade_kmh', 'hora_sin', 'hora_cos', 'dia_sem', 'eh_feriado'
         ],
         'gru': [
             'velocidade_kmh', 'aceleracao', 'latitude', 'longitude',
