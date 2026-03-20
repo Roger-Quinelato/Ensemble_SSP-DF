@@ -5,7 +5,7 @@ Carrega modelos ja treinados e classifica novos dados sem re-treinar.
 
 Uso:
     python -m src.pipeline.inference \
-        --models-dir outputs/models_saved \
+        --models-dir outputs/<run_id>/models_saved \
         --config config_mapeamento.yaml \
         --input novos_dados.csv \
         --output outputs_inference/
@@ -244,15 +244,38 @@ def _load_models_from_manifest(
     return iso_models, hbos_models, temporal_entries, scaler, gru_scaler
 
 
-def load_thresholds(models_dir, percentile=95):
+def load_thresholds(models_dir, percentile=95, manifest=None):
     """
     Carrega thresholds de producao salvos pelo treinamento.
     Se nao existir arquivo de thresholds, usa os percentis padrao dos scores.
     """
+    manifest_thresh = None
     thresh_path = os.path.join(models_dir, f"thresholds_p{percentile}.json")
+    if manifest and isinstance(manifest.get("thresholds"), dict):
+        manifest_thresh = manifest["thresholds"].get(str(percentile))
+        if isinstance(manifest_thresh, dict) and manifest_thresh.get("path"):
+            thresh_path = _resolve_path(models_dir, manifest_thresh["path"])
+
     if os.path.exists(thresh_path):
-        with open(thresh_path) as f:
-            return json.load(f)
+        with open(thresh_path, encoding="utf-8") as f:
+            thresholds = json.load(f)
+
+        if isinstance(manifest_thresh, dict):
+            expected_hash = manifest_thresh.get("sha256")
+            if expected_hash:
+                verify_artifact_strict(
+                    thresh_path,
+                    expected_hash,
+                    f"thresholds_p{percentile}.json",
+                )
+                logger.info(
+                    f"Integridade de thresholds verificada: thresholds_p{percentile}.json"
+                )
+            else:
+                logger.warning(
+                    f"sha256 de thresholds nao disponivel para p{percentile} no manifesto."
+                )
+        return thresholds
     logger.warning(
         f"thresholds_p{percentile}.json nao encontrado em {models_dir}. "
         "Os thresholds serao recalculados nos novos dados (modo degradado). "
@@ -282,6 +305,10 @@ def predict(
     Returns:
         pd.DataFrame: DataFrame com scores e ensemble_alert.
     """
+    # CONTRATO DE ARTEFATOS:
+    # OBRIGATORIOS: models_manifest.json, scaler.joblib, iso_*.joblib, hbos_*.joblib
+    # CONDICIONAIS (temporal): gru_scaler.joblib, temporal_*.h5
+    # MODO DEGRADADO: thresholds ausentes -> recalibra (WARNING, nao excecao)
     if not logger.handlers:
         from src.utils.logger_utils import setup_logger
 
@@ -380,7 +407,7 @@ def predict(
     # 4. Scores ISO
     logger.info("ETAPA 4: Scores Isolation Forest")
     score_columns_audit = []
-    thresholds_loaded = load_thresholds(models_dir, percentile)
+    thresholds_loaded = load_thresholds(models_dir, percentile, manifest=manifest)
     optimizer = ThresholdOptimizer([percentile])
 
     for model_name, iso_model in iso_models.items():

@@ -861,13 +861,14 @@ def export_results(
     manifest = {"iso": [], "hbos": [], "temporal": [], "scalers": {}}
     for fname in os.listdir(models_dir):
         fpath = os.path.join(models_dir, fname)
+        rel_path = os.path.relpath(fpath, models_dir)
         if fname.startswith("iso_") and fname.endswith(".joblib"):
             tag = fname.replace(".joblib", "").upper()
             manifest["iso"].append(
                 {
                     "tag": tag,
                     "name": tag,
-                    "path": fpath,
+                    "path": rel_path,
                     "type": "joblib",
                     "sha256": sha256_file(fpath),
                 }
@@ -878,7 +879,7 @@ def export_results(
                 {
                     "tag": tag,
                     "name": tag,
-                    "path": fpath,
+                    "path": rel_path,
                     "type": "joblib",
                     "sha256": sha256_file(fpath),
                 }
@@ -889,32 +890,32 @@ def export_results(
                 {
                     "tag": tag,
                     "name": tag,
-                    "path": fpath,
+                    "path": rel_path,
                     "type": "keras",
                     "sha256": sha256_file(fpath),
                 }
             )
         elif fname == "scaler.joblib":
             manifest["scaler"] = {
-                "path": fpath,
+                "path": rel_path,
                 "type": "joblib",
                 "sha256": sha256_file(fpath),
             }
-            manifest["scalers"]["main"] = fpath
+            manifest["scalers"]["main"] = rel_path
         elif fname == "gru_scaler.joblib":
             manifest["gru_scaler"] = {
-                "path": fpath,
+                "path": rel_path,
                 "type": "joblib",
                 "sha256": sha256_file(fpath),
             }
-            manifest["scalers"]["gru"] = fpath
+            manifest["scalers"]["gru"] = rel_path
 
     manifest["thresholds"] = {}
     for p in thresholds_by_percentile.keys():
         thresh_path = os.path.join(models_dir, f"thresholds_p{p}.json")
         if os.path.exists(thresh_path):
             manifest["thresholds"][str(p)] = {
-                "path": thresh_path,
+                "path": os.path.relpath(thresh_path, models_dir),
                 "type": "json",
                 "sha256": sha256_file(thresh_path),
             }

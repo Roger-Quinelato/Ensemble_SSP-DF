@@ -1,0 +1,28 @@
+services:
+  train:
+    build: .
+    image: sspdf-anomalias
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+
+  infer:
+    build: .
+    image: sspdf-anomalias
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    command:
+      - python
+      - -m
+      - src.pipeline.inference
+      - --models-dir
+      - /app/outputs/${RUN_ID}/models_saved
+      - --input
+      - /app/data/input/${INPUT_FILE}
+      - --output
+      - /app/outputs/inference_${RUN_ID}

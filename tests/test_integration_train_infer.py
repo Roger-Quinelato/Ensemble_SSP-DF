@@ -238,6 +238,14 @@ class TestManifestIntegrity:
         with open(path, encoding="utf-8") as f:
             manifest = json.load(f)
 
+        def _resolve(p):
+            """Resolve path relativo ao models_dir (retrocompatível com absolutos)."""
+            if not p:
+                return p
+            if os.path.isabs(p):
+                return p
+            return os.path.join(models_dir, p)
+
         missing_files = []
         for section_name, section in manifest.items():
             if section_name in ("thresholds", "run_id", "timestamp"):
@@ -245,11 +253,13 @@ class TestManifestIntegrity:
             if isinstance(section, list):
                 for entry in section:
                     if isinstance(entry, dict) and "path" in entry:
-                        if not os.path.exists(entry["path"]):
-                            missing_files.append(entry["path"])
+                        resolved = _resolve(entry["path"])
+                        if not os.path.exists(resolved):
+                            missing_files.append(resolved)
             elif isinstance(section, dict) and "path" in section:
-                if section.get("path") and not os.path.exists(section["path"]):
-                    missing_files.append(section["path"])
+                resolved = _resolve(section.get("path", ""))
+                if resolved and not os.path.exists(resolved):
+                    missing_files.append(resolved)
 
         assert len(missing_files) == 0, (
             "Arquivos referenciados no manifesto nao encontrados:\n"
