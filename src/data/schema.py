@@ -59,7 +59,10 @@ RAW_INPUT_SCHEMA = pa.DataFrameSchema(
     },
     strict=False,
     checks=[
-        pa.Check(lambda df: len(df) >= 100, error="Dataset deve ter ao menos 100 registros"),
+        # Mínimo de 1 registro — sem restrição de tamanho de amostra.
+        # Inferência deve aceitar micro-batches (até 1 registro).
+        # Treinamento com amostras pequenas é válido em desenvolvimento.
+        pa.Check(lambda df: len(df) >= 1, error="Dataset deve ter ao menos 1 registro"),
     ],
     description="Schema de entrada do pipeline SSP-DF apos padronizacao de colunas",
 )

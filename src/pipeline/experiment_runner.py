@@ -1,35 +1,107 @@
+import logging
+
 from src.utils.evaluation import ThresholdOptimizer, ModelConcordanceAnalyzer
 from src.models.temporal_autoencoder import TemporalAutoencoder
 from src.models.models_base import BaselineModels
 from src.data.data_processor import DataProcessor
-from src.utils.logger_utils import logger
 from src.utils.ensemble_decision import (
     compute_ensemble_decision,
     compute_vehicle_risk_summary,
 )
 from src.utils.model_selection import compute_val_stability_metrics
+from src.utils.artifact_utils import sha256_file
+from src.utils.git_utils import format_model_version, get_git_info
 from config.feature_config import get_features_for_model
 import os
 import csv
 import datetime
+import re
 import pandas as pd
 import numpy as np
 import yaml
 import json
 import joblib
 
+logger = logging.getLogger("sspdf")
+RUN_ID_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 
-def _align_ra_columns(df_train, partitions):
-    """Alinha schema de colunas RA_* usando o treino como referencia."""
-    train_ra_cols = [c for c in df_train.columns if c.startswith("RA_")]
+
+def _resolve_versioned_output_dir(output_dir, run_id):
+    """
+    Garante que output_dir sempre seja versionado como outputs/<run_id>.
+    """
+    normalized = os.path.normpath(output_dir)
+    base_name = os.path.basename(normalized)
+
+    if RUN_ID_PATTERN.match(base_name):
+        if run_id and run_id != base_name:
+            logger.warning(
+                f"output_dir ja possui run_id ({base_name}) diferente do informado ({run_id}). "
+                "Usando run_id do diretorio para manter consistencia."
+            )
+        return normalized, base_name
+
+    return os.path.join(normalized, run_id), run_id
+
+
+def _normalize_threshold_model_name(model_name):
+    """Normaliza nome de modelo para lookup consistente no inference."""
+    if not model_name:
+        return model_name
+    if model_name.startswith("ISO") or model_name.startswith("HBOS"):
+        return model_name.upper()
+    if model_name.startswith("Temporal_"):
+        parts = model_name.split("_")
+        if len(parts) >= 2:
+            parts[1] = parts[1].capitalize()
+            return "_".join(parts)
+    return model_name
+
+
+def _canonical_temporal_name_from_file(fname):
+    """
+    Converte nome de arquivo temporal_* para nome canonico usado em treino/inferencia.
+    Ex.: temporal_union_ISO_n100_HBOS_bins10.h5 -> Temporal_Union_ISO_n100_HBOS_bins10
+    """
+    stem = fname.replace(".h5", "")
+    payload = stem.replace("temporal_", "", 1)
+    parts = payload.split("_")
+    if parts:
+        parts[0] = parts[0].capitalize()
+    return "Temporal_" + "_".join(parts)
+
+
+def _align_ra_columns(partitions: list, reference_cols: list) -> list:
+    """
+    Alinha colunas de One-Hot Encoding (RA_*) entre particoes.
+
+    Adiciona colunas faltantes (preenchidas com 0) e remove colunas extras
+    que existem em val/test mas nao no treino.
+
+    IMPORTANTE: Nao muta os DataFrames originais - retorna copias modificadas.
+
+    Args:
+        partitions: Lista de DataFrames [df_train, df_val, df_test].
+        reference_cols: Lista de colunas RA_* do DataFrame de treino.
+    Returns:
+        Lista de DataFrames alinhados, na mesma ordem de partitions.
+    """
+    aligned = []
     for partition in partitions:
-        for col in train_ra_cols:
-            if col not in partition.columns:
-                partition[col] = 0
-        extra_cols = [
-            c for c in partition.columns if c.startswith("RA_") and c not in train_ra_cols
-        ]
-        partition.drop(columns=extra_cols, inplace=True, errors="ignore")
+        part = partition.copy()
+
+        # Adicionar colunas RA_* que existem no treino mas nao nesta particao.
+        missing = [col for col in reference_cols if col not in part.columns]
+        for col in missing:
+            part[col] = 0
+
+        # Remover colunas RA_* extras que nao existem no treino.
+        extra = [c for c in part.columns if c.startswith("RA_") and c not in reference_cols]
+        if extra:
+            part = part.drop(columns=extra, errors="ignore")
+
+        aligned.append(part)
+    return aligned
 
 
 def _build_train_stats(df_train, map_cols):
@@ -105,13 +177,28 @@ def load_data(proc, config, input_path):
     df_test, _ = proc.feature_engineering(df_test)
     proc.features_to_use = train_features  # schema do treino
 
-    _align_ra_columns(df_train, [df_val, df_test])
+    ra_cols_train = [c for c in df_train.columns if c.startswith("RA_")]
+    df_train, df_val, df_test = _align_ra_columns(
+        [df_train, df_val, df_test], ra_cols_train
+    )
+    logger.info(
+        f"   Colunas RA alinhadas: {len(ra_cols_train)} colunas de referencia "
+        "(treino -> val -> test, sem mutacao dos originais)"
+    )
     logger.info(f"   Colunas alinhadas: {len(df_train.columns)} features no treino")
     stats = _build_train_stats(df_train, map_cols)
 
     logger.info("=" * 80)
     logger.info("NORMALIZANDO FEATURES")
-    scaler_root = getattr(proc, "models_dir", os.path.join("outputs", "models_saved"))
+    scaler_root = getattr(proc, "models_dir", None)
+    if not scaler_root:
+        raise RuntimeError(
+            "proc.models_dir nao definido. Governanca exige uso de outputs/<run_id>/models_saved."
+        )
+    if os.path.basename(os.path.normpath(scaler_root)) != "models_saved":
+        raise RuntimeError(
+            f"models_dir invalido: {scaler_root}. Use outputs/<run_id>/models_saved."
+        )
     scaler_path = os.path.join(scaler_root, "scaler.joblib")
     df_train = proc.fit_scaler(df_train, output_path=scaler_path)
     df_val = proc.transform_scaler(df_val, scaler_path=scaler_path)
@@ -136,6 +223,23 @@ def prepare_model_features(df, df_train, config, proc, models_dir):
     """
     Prepara arrays de features por modelo (ISO, HBOS, GRU).
     """
+    # =============================================================================
+    # POR QUE DOIS SCALERS SEPARADOS?
+    #
+    # scaler.joblib     -> StandardScaler para FEATURES_ISO e FEATURES_HBOS
+    #                     Nao inclui lat/lon porque ISO e HBOS nao usam coordenadas.
+    #
+    # gru_scaler.joblib -> StandardScaler para FEATURES_GRU_AUTOENCODER
+    #                     Inclui latitude e longitude - coordenadas geograficas tem
+    #                     ranges muito diferentes de features temporais (hora_sin,
+    #                     hora_cos estao em [-1,1]; lat/lon estao em [-16,-15] e
+    #                     [-48,-47]). Normalizar com o mesmo scaler do ISO/HBOS
+    #                     causaria distorcao nas features temporais do GRU.
+    #
+    # ATENCAO: Se no futuro lat/lon forem adicionados ao ISO ou HBOS,
+    # sera necessario um terceiro scaler ou incluir lat/lon no scaler principal.
+    # Nao adicionar lat/lon ao scaler principal sem revisar FEATURES_GRU_AUTOENCODER.
+    # =============================================================================
     iso_features = get_features_for_model("isolation_forest", df.columns.tolist())
     hbos_features = get_features_for_model("hbos", df.columns.tolist())
     gru_features = get_features_for_model("gru", df.columns.tolist())
@@ -205,7 +309,7 @@ def train_base_models(df, features_dict, config, models_dir):
     for n_est in iso_n_estimators_list:
         tag = f"ISO_n{n_est}"
         logger.info(f"   -> {tag}...")
-        _, _, model = models_base_iso.train_iso(
+        model = models_base_iso.train_iso(
             n_estimators=n_est, contamination=iso_contamination
         )
         joblib.dump(model, os.path.join(models_dir, f"iso_n{n_est}.joblib"))
@@ -231,7 +335,7 @@ def train_base_models(df, features_dict, config, models_dir):
     for n_bins in hbos_n_bins_list:
         tag = f"HBOS_bins{n_bins}"
         logger.info(f"   -> {tag}...")
-        _, _, model = models_base_hbos.train_hbos(
+        model = models_base_hbos.train_hbos(
             n_bins=n_bins, contamination=hbos_contamination
         )
         joblib.dump(model, os.path.join(models_dir, f"hbos_bins{n_bins}.joblib"))
@@ -267,16 +371,15 @@ def train_base_models(df, features_dict, config, models_dir):
 def train_temporal_models(
     df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
 ):
-    """Treina modelos temporais (GRU) em múltiplos cenários.
+    """Train temporal models (GRU/LSTM) in multiple scenarios.
 
-    Cenários de treinamento:
-    - Union: treino nos registros em que ISO OU HBOS consideram normal (conjunto maior)
-    - Inter: treino nos registros em que ISO E HBOS concordam como normal (conjunto menor/mais puro)
-    - Baseline: treino em todos os registros do período de treino sem filtro de qualidade
+    Training scenarios:
+    - Union: train on rows where ISO OR HBOS vote inlier (larger set)
+    - Inter: train on rows where ISO AND HBOS vote inlier (smaller/purer set)
+    - Baseline: train on all train-period rows (no tabular quality filter)
     """
     map_cols = config["mapeamento_colunas"]
     gap_seconds = config.get("configuracoes_gerais", {}).get("gap_segmentation_seconds", 300)
-    mask_temporal_train = pd.Series(df.index < train_end, index=df.index)
     optimizer = ThresholdOptimizer(config["parametros"]["percentis_teste"])
     temporal_results = []
     temporal_cols = []
@@ -310,17 +413,45 @@ def train_temporal_models(
         arch_type=arch_type,
         arch_config=arch_config,
     )
+    seq_first_indices, seq_last_indices = temporal_pipe.get_sequence_index_bounds()
+    if len(seq_last_indices) == 0:
+        logger.warning("Nenhuma sequencia temporal valida foi criada para treino GRU.")
+        return df, temporal_results, temporal_cols
+
+    train_indices = df.index[df.index < train_end]
+    if len(train_indices) == 0:
+        raise RuntimeError("Nenhum indice de treino disponivel para o filtro temporal strict.")
+    train_cutoff_idx = train_indices.max()
+    mask_train_old = np.asarray(seq_last_indices <= train_cutoff_idx).astype(bool)
+    mask_train_strict = np.asarray(
+        (seq_first_indices <= train_cutoff_idx) & (seq_last_indices <= train_cutoff_idx)
+    ).astype(bool)
+
+    n_total_seq = len(seq_last_indices)
+    n_before = int(mask_train_old.sum())
+    n_after = int(mask_train_strict.sum())
+    logger.info(
+        f"Sequencias criadas: {n_total_seq:,} total. "
+        f"Sequencias de treino STRICT (todos elementos no treino): "
+        f"{n_after:,} ({(n_after / n_total_seq * 100):.1f}%)"
+    )
+    if n_before > 0:
+        logger.info(
+            f"Anti-leakage temporal: {n_before - n_after:,} sequencias removidas "
+            f"da borda do cutoff (sequencias que cruzavam treino->validacao). "
+            f"Impacto: {((n_before - n_after) / n_before * 100):.2f}% do treino."
+        )
 
     legacy_model_prefix = "l" + "stm_"
     for model_name in os.listdir(models_dir):
         if model_name.startswith(legacy_model_prefix) and model_name.endswith(".h5"):
             os.remove(os.path.join(models_dir, model_name))
 
-    # Limpar modelos com semântica antiga (union/inter invertidos)
+    # Limpar modelos com semantica antiga (union/inter invertidos)
     for fname in os.listdir(models_dir):
         if fname.startswith("temporal_union_") or fname.startswith("temporal_inter_"):
             os.remove(os.path.join(models_dir, fname))
-            logger.info(f"   Removido modelo com semântica antiga: {fname}")
+            logger.info(f"   Removido modelo com semantica antiga: {fname}")
 
     logger.info(
         f"TREINAMENTO TEMPORAL MULTI-CENARIOS ({arch_type.upper()}) | window={window_size}, epochs={temporal_epochs}, batch_size={temporal_batch_size}"
@@ -329,22 +460,35 @@ def train_temporal_models(
 
     for iso_name, iso_mask_inlier in iso_masks.items():
         for hbos_name, hbos_mask_inlier in hbos_masks.items():
-            # UNION: OR — conjunto maior (mais permissivo)
-            mask_train_union = (iso_mask_inlier | hbos_mask_inlier) & mask_temporal_train
-            # INTER: AND — conjunto menor (mais restritivo)
-            mask_train_inter = (iso_mask_inlier & hbos_mask_inlier) & mask_temporal_train
+            iso_last_mask = (
+                pd.Series(iso_mask_inlier, index=df.index)
+                .reindex(seq_last_indices)
+                .fillna(False)
+                .values.astype(bool)
+            )
+            hbos_last_mask = (
+                pd.Series(hbos_mask_inlier, index=df.index)
+                .reindex(seq_last_indices)
+                .fillna(False)
+                .values.astype(bool)
+            )
+
+            # Union: OR over tabular inliers, constrained by strict sequence train boundary.
+            mask_train_union = mask_train_strict & (iso_last_mask | hbos_last_mask)
+            # Inter: AND over tabular inliers, constrained by strict sequence train boundary.
+            mask_train_inter = mask_train_strict & (iso_last_mask & hbos_last_mask)
 
             n_union_mask = int(mask_train_union.sum())
             n_inter_mask = int(mask_train_inter.sum())
             logger.info(
-                f"   Máscara treino ({iso_name} x {hbos_name}): "
-                f"Union={n_union_mask:,} | Inter={n_inter_mask:,}"
+                f"   Mascara treino ({iso_name} x {hbos_name}): "
+                f"Union={n_union_mask:,} sequencias | Inter={n_inter_mask:,} sequencias"
             )
 
             temporal_name_union = f"Temporal_Union_{iso_name}_{hbos_name}"
             mse_u, idx_u, model_u = temporal_pipe.train_evaluate(
                 temporal_name_union,
-                mask_train=mask_train_union,
+                sequence_mask=mask_train_union,
                 epochs=temporal_epochs,
                 batch_size=temporal_batch_size,
             )
@@ -355,19 +499,18 @@ def train_temporal_models(
             if mse_u is not None and idx_u is not None:
                 df.loc[idx_u, f"{temporal_name_union}_score"] = mse_u
                 temporal_cols.append(f"{temporal_name_union}_score")
-                calib_mask_u = pd.Series(mask_train_union, index=df.index).loc[idx_u].values
                 df, metrics = optimizer.apply_dynamic_thresholds(
                     df,
                     f"{temporal_name_union}_score",
                     temporal_name_union,
-                    calibration_scores=mse_u[calib_mask_u.astype(bool)],
+                    calibration_scores=mse_u[mask_train_union],
                 )
                 temporal_results.extend(metrics)
 
             temporal_name_inter = f"Temporal_Inter_{iso_name}_{hbos_name}"
             mse_i, idx_i, model_i = temporal_pipe.train_evaluate(
                 temporal_name_inter,
-                mask_train=mask_train_inter,
+                sequence_mask=mask_train_inter,
                 epochs=temporal_epochs,
                 batch_size=temporal_batch_size,
             )
@@ -378,18 +521,17 @@ def train_temporal_models(
             if mse_i is not None and idx_i is not None:
                 df.loc[idx_i, f"{temporal_name_inter}_score"] = mse_i
                 temporal_cols.append(f"{temporal_name_inter}_score")
-                calib_mask_i = pd.Series(mask_train_inter, index=df.index).loc[idx_i].values
                 df, metrics = optimizer.apply_dynamic_thresholds(
                     df,
                     f"{temporal_name_inter}_score",
                     temporal_name_inter,
-                    calibration_scores=mse_i[calib_mask_i.astype(bool)],
+                    calibration_scores=mse_i[mask_train_inter],
                 )
                 temporal_results.extend(metrics)
 
     mse_s, idx_s, model_s = temporal_pipe.train_evaluate(
         "Temporal_Baseline",
-        mask_train=mask_temporal_train,
+        sequence_mask=mask_train_strict,
         epochs=temporal_epochs,
         batch_size=temporal_batch_size,
     )
@@ -398,12 +540,11 @@ def train_temporal_models(
     if mse_s is not None and idx_s is not None:
         df.loc[idx_s, "Temporal_Baseline_score"] = mse_s
         temporal_cols.append("Temporal_Baseline_score")
-        calib_mask_s = mask_temporal_train.loc[idx_s].values.astype(bool)
         df, metrics = optimizer.apply_dynamic_thresholds(
             df,
             "Temporal_Baseline_score",
             "Temporal_Baseline",
-            calibration_scores=mse_s[calib_mask_s],
+            calibration_scores=mse_s[mask_train_strict],
         )
         temporal_results.extend(metrics)
 
@@ -411,7 +552,6 @@ def train_temporal_models(
     if not temporal_score_cols:
         logger.warning(f"Nenhum modelo temporal ({arch_type.upper()}) produziu scores")
     return df, temporal_results, temporal_cols
-
 
 def export_results(
     df,
@@ -421,15 +561,49 @@ def export_results(
     metrics_dir,
     master_dir,
     models_dir,
+    df_train=None,
     df_val=None,
     stats=None,
     run_id=None,
+    git_info=None,
+    model_version=None,
 ):
     """
     Exporta resultados, metricas e analise de concordancia.
     """
     if not results_summary:
         raise RuntimeError("PIPELINE ABORTADO: Nenhuma metrica foi gerada.")
+
+    # Serializar thresholds por percentil para uso em inferencia
+    # CRITICO: inference.py depende destes arquivos para nao entrar em modo degradado
+    thresholds_by_percentile = {}  # {90: {"ISO_N100": 0.312, ...}, 95: {...}, 99: {...}}
+    for metric in results_summary:
+        model_name = _normalize_threshold_model_name(metric.get("Model", ""))
+        percentile = metric.get("Percentile")
+        threshold = metric.get("Threshold_Value")
+        if model_name and percentile is not None and threshold is not None:
+            p_key = int(percentile)
+            thresholds_by_percentile.setdefault(p_key, {})
+            thresholds_by_percentile[p_key][model_name] = float(threshold)
+
+    for p, thresh_dict in thresholds_by_percentile.items():
+        thresh_path = os.path.join(models_dir, f"thresholds_p{p}.json")
+        with open(thresh_path, "w", encoding="utf-8") as f:
+            json.dump(thresh_dict, f, indent=2)
+        logger.info(
+            f"Thresholds p{p} serializados: {thresh_path} ({len(thresh_dict)} modelos)"
+        )
+
+    if thresholds_by_percentile:
+        logger.info(
+            f"THRESHOLDS SERIALIZADOS: {list(thresholds_by_percentile.keys())} percentis. "
+            "inference.py usara estes valores sem recalibrar nos dados novos."
+        )
+    else:
+        logger.warning(
+            "ATENCAO: Nenhum threshold encontrado em results_summary para serializar. "
+            "Verificar se apply_dynamic_thresholds() esta sendo chamado corretamente."
+        )
 
     # Cobertura de scoring temporal por registro
     temporal_score_cols = [
@@ -588,12 +762,27 @@ def export_results(
         logger.warning("Nenhuma coluna de label encontrada para analise")
 
     # Selecao de configuracao via validation set
-    if df_val is not None and len(df_val) > 0:
+    if (
+        df_train is not None
+        and df_val is not None
+        and len(df_train) > 0
+        and len(df_val) > 0
+    ):
+        # df_train/df_val vindos do load_data podem nao carregar colunas de score.
+        # Reconstroi os recortes no df consolidado (ja pontuado), mantendo apenas
+        # indices originais de treino/validacao para evitar leakage com teste.
+        df_train_scored = df.loc[df_train.index]
+        df_val_scored = df.loc[df_val.index]
+        logger.info(
+            f"SELECAO DE CONFIGURACAO: usando df_train ({len(df_train_scored):,} registros) "
+            f"como referencia. df_val={len(df_val_scored):,} registros como comparacao. "
+            "df_test NAO entra na selecao (sem leakage)."
+        )
         score_cols_for_selection = [
             c for c in score_columns_audit if c.startswith("ISO") or c.startswith("HBOS")
         ]
         df_model_selection = compute_val_stability_metrics(
-            df, df_val, score_cols_for_selection, percentile=95
+            df_train_scored, df_val_scored, score_cols_for_selection, percentile=95
         )
         if not df_model_selection.empty:
             df_model_selection.to_csv(
@@ -602,8 +791,8 @@ def export_results(
             logger.info("Selecao de configuracao exportada: model_selection_val.csv")
     else:
         logger.warning(
-            "Validation set nao disponivel para selecao de configuracao. "
-            "Execute com split 60/20/20 para usar este recurso."
+            "Split de treino/validacao nao disponivel para selecao de configuracao. "
+            "Execute com split 60/20/20 para usar este recurso sem leakage."
         )
 
     df.to_parquet(os.path.join(master_dir, "resultado_final.parquet"), index=False)
@@ -628,8 +817,27 @@ def export_results(
                 output_path=report_path,
                 run_id=run_id or "N/A",
             )
+            size_kb = os.path.getsize(report_path) / 1024 if os.path.exists(report_path) else 0
+            logger.info(f"Relatorio HTML gerado: {report_path} ({size_kb:.0f} KB)")
+        except ImportError:
+            logger.warning(
+                "AVISO: plotly nao instalado - relatorio HTML nao gerado. "
+                "Instale com: pip install 'plotly>=5.18.0'"
+            )
+        except FileNotFoundError as e:
+            logger.error(
+                f"ERRO ao gerar relatorio HTML: arquivo nao encontrado: {e}\n"
+                "Verificar que vehicle_risk_ranking.csv e concordancia_modelos.csv "
+                "foram gerados pelos fixes C3 e H2 antes deste fix."
+            )
         except Exception as e:
-            logger.warning(f"Relatorio HTML nao gerado (nao critico): {e}")
+            logger.error(
+                f"ERRO ao gerar relatorio HTML: {e}\n"
+                "Stack trace completo nos logs de debug."
+            )
+            import traceback
+
+            logger.debug(traceback.format_exc())
 
     map_cols = config["mapeamento_colunas"]
     id_cols = [
@@ -649,23 +857,91 @@ def export_results(
     )
     logger.info("Resultados segmentados exportados.")
 
-    # Gerar manifesto dos modelos para uso pelo inference.py
+    # Gerar manifesto dos modelos para uso pelo inference.py (com hash de integridade)
     manifest = {"iso": [], "hbos": [], "temporal": [], "scalers": {}}
     for fname in os.listdir(models_dir):
         fpath = os.path.join(models_dir, fname)
         if fname.startswith("iso_") and fname.endswith(".joblib"):
             tag = fname.replace(".joblib", "").upper()
-            manifest["iso"].append({"name": tag, "path": fpath})
+            manifest["iso"].append(
+                {
+                    "tag": tag,
+                    "name": tag,
+                    "path": fpath,
+                    "type": "joblib",
+                    "sha256": sha256_file(fpath),
+                }
+            )
         elif fname.startswith("hbos_") and fname.endswith(".joblib"):
             tag = fname.replace(".joblib", "").upper()
-            manifest["hbos"].append({"name": tag, "path": fpath})
+            manifest["hbos"].append(
+                {
+                    "tag": tag,
+                    "name": tag,
+                    "path": fpath,
+                    "type": "joblib",
+                    "sha256": sha256_file(fpath),
+                }
+            )
         elif fname.startswith("temporal_") and fname.endswith(".h5"):
-            name = "Temporal_" + fname.replace("temporal_", "").replace(".h5", "")
-            manifest["temporal"].append({"name": name, "path": fpath})
+            tag = _canonical_temporal_name_from_file(fname)
+            manifest["temporal"].append(
+                {
+                    "tag": tag,
+                    "name": tag,
+                    "path": fpath,
+                    "type": "keras",
+                    "sha256": sha256_file(fpath),
+                }
+            )
         elif fname == "scaler.joblib":
+            manifest["scaler"] = {
+                "path": fpath,
+                "type": "joblib",
+                "sha256": sha256_file(fpath),
+            }
             manifest["scalers"]["main"] = fpath
         elif fname == "gru_scaler.joblib":
+            manifest["gru_scaler"] = {
+                "path": fpath,
+                "type": "joblib",
+                "sha256": sha256_file(fpath),
+            }
             manifest["scalers"]["gru"] = fpath
+
+    manifest["thresholds"] = {}
+    for p in thresholds_by_percentile.keys():
+        thresh_path = os.path.join(models_dir, f"thresholds_p{p}.json")
+        if os.path.exists(thresh_path):
+            manifest["thresholds"][str(p)] = {
+                "path": thresh_path,
+                "type": "json",
+                "sha256": sha256_file(thresh_path),
+            }
+
+    # Rastreabilidade de versao do codigo de treinamento.
+    git_info = git_info or get_git_info()
+    model_version = model_version or format_model_version(git_info, run_id or "unknown")
+    manifest["model_version"] = model_version
+    manifest["git"] = {
+        "commit_hash": git_info["commit_hash"],
+        "commit_short": git_info["commit_short"],
+        "branch": git_info["branch"],
+        "is_dirty": git_info["is_dirty"],
+        "dirty_warning": git_info.get("dirty_warning"),
+        "commit_message": git_info["commit_message"],
+        "commit_timestamp": git_info["commit_timestamp"],
+    }
+    manifest["run_id"] = run_id
+    manifest["training_timestamp"] = datetime.datetime.now().isoformat()
+    logger.info(f"Versao do modelo: {model_version}")
+    if git_info.get("is_dirty"):
+        logger.warning(
+            "ATENCAO: modelo treinado com codigo nao commitado. "
+            f"Branch: {git_info['branch']} | Commit base: {git_info['commit_short']}. "
+            "Para auditabilidade completa, commitar mudancas antes do proximo treinamento."
+        )
+
     manifest_path = os.path.join(models_dir, "models_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -676,43 +952,52 @@ def run_experiment(
     config_path="config_mapeamento.yaml",
     input_path=None,
     output_dir="outputs",
-    epochs=5,
+    epochs=None,
     seed=42,
     run_id=None,
 ):
     """
     Orquestra o pipeline completo de deteccao de anomalias.
     """
+    if run_id is None:
+        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    output_dir, run_id = _resolve_versioned_output_dir(output_dir, run_id)
     metrics_dir = os.path.join(output_dir, "metrics")
     master_dir = os.path.join(output_dir, "master_table")
     models_dir = os.path.join(output_dir, "models_saved")
     for d in [metrics_dir, master_dir, models_dir]:
         os.makedirs(d, exist_ok=True)
 
-    if run_id is None:
-        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    sspdf_logger = logging.getLogger("sspdf")
 
-    # Reconfigurar logger com run_id para log por execucao
-    from src.utils.logger_utils import setup_logger as _setup_logger
-    import logging
+    # Remover handlers antigos para evitar duplicacao e mistura entre runs.
+    for handler in sspdf_logger.handlers[:]:
+        sspdf_logger.removeHandler(handler)
+        handler.close()
 
-    _run_logger = _setup_logger(
-        name=f"sspdf_{run_id}",
-        log_file=os.path.join(metrics_dir, "execution.log"),
-        level=logging.INFO,
-        run_id=run_id,
+    os.makedirs(metrics_dir, exist_ok=True)
+    _run_file_handler = logging.FileHandler(
+        os.path.join(metrics_dir, "execution.log"),
+        encoding="utf-8",
     )
-
-    # Logger compartilhado entre modulos (importado como `logger`) precisa
-    # apontar para o arquivo da run atual.
-    global logger
-    logger = _setup_logger(
-        name="sspdf",
-        log_file=os.path.join(metrics_dir, "execution.log"),
-        level=logging.INFO,
-        run_id=run_id,
+    _run_file_handler.setLevel(logging.INFO)
+    _run_file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
     )
-    logger.info(f"RUN ID: {run_id}")
+    sspdf_logger.addHandler(_run_file_handler)
+
+    _console_handler = logging.StreamHandler()
+    _console_handler.setLevel(logging.INFO)
+    _console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+    sspdf_logger.addHandler(_console_handler)
+
+    sspdf_logger.setLevel(logging.INFO)
+    sspdf_logger.info(f"Logger configurado para run_id={run_id}")
+    sspdf_logger.info(f"Output dir versionado: {output_dir}")
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -720,9 +1005,19 @@ def run_experiment(
     global_seed = config.get("random_state", seed)
     np.random.seed(global_seed)
 
-    # CLI overrides config; config overrides default
-    if epochs == 5:  # default do argparse, nao foi explicitamente setado
-        epochs = config.get("parametros", {}).get("temporal", {}).get("epochs", 5)
+    # Precedencia explicita: CLI > YAML > fallback hardcoded
+    yaml_epochs = config.get("parametros", {}).get("temporal", {}).get("epochs", 10)
+    if epochs is None:
+        # Usuario nao passou --epochs: usar YAML
+        epochs = yaml_epochs
+        logger.info(f"--epochs nao informado. Usando valor do YAML: {epochs} epochs")
+    else:
+        # Usuario passou --epochs explicitamente: respeitar
+        logger.info(
+            f"--epochs={epochs} (explicito via CLI). "
+            f"Valor do YAML ({yaml_epochs}) ignorado."
+        )
+
     # Propaga epochs efetivas para o config consumido pelo treino temporal.
     config.setdefault("parametros", {}).setdefault("temporal", {})["epochs"] = epochs
 
@@ -736,6 +1031,8 @@ def run_experiment(
 
     # Iniciar MLflow run (se disponivel e nao desativado)
     _tracking_run = init_experiment(run_id=run_id)
+    git_info = get_git_info()
+    model_version = format_model_version(git_info, run_id)
 
     if _tracking_run:
         # Logar todos os parametros do YAML centralizado
@@ -811,9 +1108,12 @@ def run_experiment(
         metrics_dir,
         master_dir,
         models_dir,
+        df_train=df_train,
         df_val=df_val,
         stats=stats,
         run_id=run_id,
+        git_info=git_info,
+        model_version=model_version,
     )
 
     index_path = os.path.join(os.path.dirname(output_dir), "runs_index.csv")
@@ -821,6 +1121,10 @@ def run_experiment(
         "run_id": run_id,
         "timestamp": datetime.datetime.now().isoformat(),
         "output_dir": output_dir,
+        "model_version": model_version,
+        "commit_hash": git_info["commit_hash"],
+        "branch": git_info["branch"],
+        "is_dirty": git_info["is_dirty"],
         "config_path": config_path,
         "n_records": len(df),
         "n_alerts_p95": (
@@ -829,12 +1133,36 @@ def run_experiment(
             else "N/A"
         ),
     }
-    file_exists = os.path.exists(index_path)
-    with open(index_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(run_entry.keys()))
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(run_entry)
+    target_fields = list(run_entry.keys())
+    existing_rows = []
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                raw_rows = list(reader)
+            if raw_rows:
+                header = raw_rows[0]
+                for row in raw_rows[1:]:
+                    if not row:
+                        continue
+                    if len(row) == len(target_fields):
+                        row_dict = dict(zip(target_fields, row))
+                    else:
+                        mapped = dict(zip(header, row[: len(header)]))
+                        row_dict = {k: mapped.get(k, "") for k in target_fields}
+                    existing_rows.append(row_dict)
+        except Exception as e:
+            logger.warning(
+                f"Nao foi possivel ler runs_index existente ({index_path}): {e}. "
+                "Arquivo sera recriado no schema atual."
+            )
+            existing_rows = []
+
+    existing_rows.append(run_entry)
+    with open(index_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=target_fields)
+        writer.writeheader()
+        writer.writerows(existing_rows)
     logger.info(f"Indice de runs atualizado: {index_path}")
 
     structured_log = {
@@ -901,6 +1229,7 @@ def run_experiment(
     end_run(status="FINISHED")
 
     logger.info("EXPERIMENTO FINALIZADO!")
+    return output_dir
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 # src/data/data_processor.py
 
+import logging
+import os
+
 import pandas as pd
 import numpy as np
 import holidays
@@ -7,7 +10,8 @@ from sklearn.preprocessing import StandardScaler
 import joblib as _joblib
 from src.data.schema import validate_input
 from src.utils.logger_utils import log_execution
-from src.utils.logger_utils import logger
+
+logger = logging.getLogger("sspdf")
 
 class DataProcessor:
     """
@@ -173,7 +177,18 @@ class DataProcessor:
 
         return df, existing_features
 
-    def fit_scaler(self, df, output_path="outputs/models_saved/scaler.joblib"):
+    def _validate_models_saved_path(self, path):
+        """Garante que o artefato seja salvo/carregado apenas em um diretorio models_saved."""
+        normalized = os.path.normpath(path)
+        parent = os.path.basename(os.path.dirname(normalized))
+        if parent != "models_saved":
+            raise ValueError(
+                "Governanca bloqueou caminho fora de models_saved: "
+                f"{path}. Use outputs/<run_id>/models_saved/."
+            )
+        return normalized
+
+    def fit_scaler(self, df, output_path=None):
         """
         Ajusta o StandardScaler APENAS nos dados de treino e serializa para disco.
         DEVE ser chamado APENAS com dados de treino (split temporal).
@@ -188,6 +203,18 @@ class DataProcessor:
             raise ValueError(
                 "features_to_use está vazio. Execute feature_engineering() primeiro."
             )
+
+        if output_path is None:
+            models_dir = getattr(self, "models_dir", None)
+            if not models_dir:
+                raise ValueError(
+                    "models_dir nao definido no DataProcessor. "
+                    "Defina proc.models_dir='outputs/<run_id>/models_saved' antes de fit_scaler()."
+                )
+            output_path = os.path.join(models_dir, "scaler.joblib")
+
+        output_path = self._validate_models_saved_path(output_path)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         existing_features = [f for f in self.features_to_use if f in df.columns]
 
@@ -221,7 +248,14 @@ class DataProcessor:
         """
         if self.scaler is None:
             if scaler_path is None:
-                scaler_path = "outputs/models_saved/scaler.joblib"
+                models_dir = getattr(self, "models_dir", None)
+                if not models_dir:
+                    raise ValueError(
+                        "models_dir nao definido no DataProcessor. "
+                        "Defina proc.models_dir='outputs/<run_id>/models_saved' ou passe scaler_path."
+                    )
+                scaler_path = os.path.join(models_dir, "scaler.joblib")
+            scaler_path = self._validate_models_saved_path(scaler_path)
             self.scaler = _joblib.load(scaler_path)
             logger.info(f"   📂 Scaler carregado de {scaler_path}")
 

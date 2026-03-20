@@ -13,6 +13,7 @@ Uso:
 
 import argparse
 import json
+import logging
 import os
 
 import joblib
@@ -29,7 +30,22 @@ from src.utils.ensemble_decision import (
     compute_vehicle_risk_summary,
 )
 from src.utils.evaluation import ThresholdOptimizer
-from src.utils.logger_utils import logger
+from src.utils.artifact_utils import verify_artifact_strict
+
+logger = logging.getLogger("sspdf")
+
+
+def _canonical_temporal_name_from_file(fname):
+    """
+    Converte temporal_*.h5 para nome canonico usado no treinamento.
+    Ex.: temporal_union_ISO_n100_HBOS_bins10.h5 -> Temporal_Union_ISO_n100_HBOS_bins10
+    """
+    stem = fname.replace(".h5", "")
+    payload = stem.replace("temporal_", "", 1)
+    parts = payload.split("_")
+    if parts:
+        parts[0] = parts[0].capitalize()
+    return "Temporal_" + "_".join(parts)
 
 
 def _resolve_path(models_dir, model_path):
@@ -52,20 +68,34 @@ def load_models_manifest(models_dir):
             "models_manifest.json nao encontrado. "
             "Descobrindo modelos pelo nome do arquivo (modo compatibilidade)."
         )
-        manifest = {"iso": [], "hbos": [], "temporal": [], "scalers": {}}
+        manifest = {
+            "iso": [],
+            "hbos": [],
+            "temporal": [],
+            "scalers": {},
+            "_integrity_available": False,
+        }
         for fname in os.listdir(models_dir):
             fpath = os.path.join(models_dir, fname)
             if fname.startswith("iso_") and fname.endswith(".joblib"):
                 manifest["iso"].append(
-                    {"name": fname.replace(".joblib", "").upper(), "path": fpath}
+                    {
+                        "tag": fname.replace(".joblib", "").upper(),
+                        "name": fname.replace(".joblib", "").upper(),
+                        "path": fpath,
+                    }
                 )
             elif fname.startswith("hbos_") and fname.endswith(".joblib"):
                 manifest["hbos"].append(
-                    {"name": fname.replace(".joblib", "").upper(), "path": fpath}
+                    {
+                        "tag": fname.replace(".joblib", "").upper(),
+                        "name": fname.replace(".joblib", "").upper(),
+                        "path": fpath,
+                    }
                 )
             elif fname.startswith("temporal_") and fname.endswith(".h5"):
-                name = fname.replace(".h5", "").replace("temporal_", "Temporal_")
-                manifest["temporal"].append({"name": name, "path": fpath})
+                name = _canonical_temporal_name_from_file(fname)
+                manifest["temporal"].append({"tag": name, "name": name, "path": fpath})
             elif fname == "scaler.joblib":
                 manifest["scalers"]["main"] = fpath
             elif fname == "gru_scaler.joblib":
@@ -79,9 +109,139 @@ def load_models_manifest(models_dir):
         for item in manifest.get(section, []):
             if "path" in item:
                 item["path"] = _resolve_path(models_dir, item["path"])
+            if "tag" not in item and "name" in item:
+                item["tag"] = item["name"]
+            if section == "temporal" and "name" in item:
+                parts = str(item["name"]).split("_")
+                if len(parts) >= 2 and parts[0] == "Temporal":
+                    parts[1] = parts[1].capitalize()
+                    item["name"] = "_".join(parts)
+                    item["tag"] = item["name"]
+
+    # Compatibilidade: manifesto pode ter scalers em bloco legado ou em chaves dedicadas.
     for key, value in manifest.get("scalers", {}).items():
         manifest["scalers"][key] = _resolve_path(models_dir, value)
+    for scaler_key in ("scaler", "gru_scaler"):
+        scaler_info = manifest.get(scaler_key)
+        if isinstance(scaler_info, dict) and "path" in scaler_info:
+            scaler_info["path"] = _resolve_path(models_dir, scaler_info["path"])
+
+    # Marcar disponibilidade de integridade (sha256 em pelo menos um artefato).
+    integrity_fields = []
+    for section in ("iso", "hbos", "temporal"):
+        integrity_fields.extend([entry.get("sha256") for entry in manifest.get(section, [])])
+    for scaler_key in ("scaler", "gru_scaler"):
+        scaler_info = manifest.get(scaler_key, {})
+        if isinstance(scaler_info, dict):
+            integrity_fields.append(scaler_info.get("sha256"))
+    manifest["_integrity_available"] = any(integrity_fields)
     return manifest
+
+
+def _ensure_artifact_integrity(
+    entry, model_name, strict_integrity=True, require_hash=False
+):
+    """
+    Verifica SHA256 quando disponivel no manifesto.
+    """
+    model_path = entry.get("path")
+    expected_hash = entry.get("sha256")
+
+    if not model_path:
+        raise ValueError(f"Entrada de manifesto sem path para {model_name}")
+
+    if expected_hash:
+        verify_artifact_strict(model_path, expected_hash, model_name)
+        return
+
+    if require_hash:
+        raise ValueError(
+            f"Manifesto invalido para {model_name}: campo sha256 ausente."
+        )
+
+    if strict_integrity:
+        logger.warning(
+            f"Integridade nao verificavel para {model_name}: campo sha256 ausente no manifesto."
+        )
+
+
+def _load_models_from_manifest(
+    manifest, strict_integrity=True, require_hash=False
+):
+    """
+    Carrega modelos listados no manifesto, verificando integridade SHA256.
+
+    Args:
+        manifest: Dict do models_manifest.json.
+        strict_integrity: Se True, valida hash quando disponivel.
+    Returns:
+        tuple: (iso_models, hbos_models, temporal_entries, scaler, gru_scaler)
+    """
+    iso_models = {}
+    hbos_models = {}
+    temporal_entries = []
+    scaler = None
+    gru_scaler = None
+
+    for entry in manifest.get("iso", []):
+        tag = entry.get("tag") or entry.get("name")
+        _ensure_artifact_integrity(
+            entry,
+            tag,
+            strict_integrity=strict_integrity,
+            require_hash=require_hash,
+        )
+        iso_models[tag] = joblib.load(entry["path"])
+
+    for entry in manifest.get("hbos", []):
+        tag = entry.get("tag") or entry.get("name")
+        _ensure_artifact_integrity(
+            entry,
+            tag,
+            strict_integrity=strict_integrity,
+            require_hash=require_hash,
+        )
+        hbos_models[tag] = joblib.load(entry["path"])
+
+    for entry in manifest.get("temporal", []):
+        tag = entry.get("tag") or entry.get("name")
+        _ensure_artifact_integrity(
+            entry,
+            tag,
+            strict_integrity=strict_integrity,
+            require_hash=require_hash,
+        )
+        temporal_entries.append({"tag": tag, "path": entry["path"]})
+
+    scaler_info = manifest.get("scaler")
+    if isinstance(scaler_info, dict) and scaler_info.get("path"):
+        _ensure_artifact_integrity(
+            scaler_info,
+            "scaler.joblib",
+            strict_integrity=strict_integrity,
+            require_hash=require_hash,
+        )
+        scaler = joblib.load(scaler_info["path"])
+    else:
+        scaler_path = manifest.get("scalers", {}).get("main")
+        if scaler_path and os.path.exists(scaler_path):
+            scaler = joblib.load(scaler_path)
+
+    gru_scaler_info = manifest.get("gru_scaler")
+    if isinstance(gru_scaler_info, dict) and gru_scaler_info.get("path"):
+        _ensure_artifact_integrity(
+            gru_scaler_info,
+            "gru_scaler.joblib",
+            strict_integrity=strict_integrity,
+            require_hash=require_hash,
+        )
+        gru_scaler = joblib.load(gru_scaler_info["path"])
+    else:
+        gru_scaler_path = manifest.get("scalers", {}).get("gru")
+        if gru_scaler_path and os.path.exists(gru_scaler_path):
+            gru_scaler = joblib.load(gru_scaler_path)
+
+    return iso_models, hbos_models, temporal_entries, scaler, gru_scaler
 
 
 def load_thresholds(models_dir, percentile=95):
@@ -108,6 +268,7 @@ def predict(
     config_path="config_mapeamento.yaml",
     output_dir="outputs_inference",
     percentile=95,
+    strict_integrity=True,
 ):
     """
     Classifica novos dados usando modelos ja treinados.
@@ -121,6 +282,11 @@ def predict(
     Returns:
         pd.DataFrame: DataFrame com scores e ensemble_alert.
     """
+    if not logger.handlers:
+        from src.utils.logger_utils import setup_logger
+
+        setup_logger(name="sspdf")
+
     os.makedirs(output_dir, exist_ok=True)
     metrics_dir = os.path.join(output_dir, "metrics")
     os.makedirs(metrics_dir, exist_ok=True)
@@ -149,19 +315,44 @@ def predict(
     df, inferred_features = proc.feature_engineering(df)
     proc.features_to_use = inferred_features
 
-    # Carregar scaler principal do treino (NUNCA re-ajustar)
-    scaler_path = os.path.join(models_dir, "scaler.joblib")
-    if not os.path.exists(scaler_path):
-        raise FileNotFoundError(
-            f"Scaler principal nao encontrado: {scaler_path}. "
-            "Execute run_experiment() primeiro para treinar os modelos."
-        )
-    df = proc.transform_scaler(df, scaler_path=scaler_path)
-    logger.info(f"   Scaler carregado de {scaler_path} (sem re-ajuste)")
-
     # 3. Carregar manifesto e modelos
     logger.info("ETAPA 3: Carregando modelos")
     manifest = load_models_manifest(models_dir)
+    has_integrity_metadata = bool(manifest.get("_integrity_available"))
+    require_hash = bool(strict_integrity and has_integrity_metadata)
+    (
+        iso_models,
+        hbos_models,
+        temporal_entries,
+        scaler,
+        gru_scaler,
+    ) = _load_models_from_manifest(
+        manifest,
+        strict_integrity=strict_integrity,
+        require_hash=require_hash,
+    )
+
+    if strict_integrity and manifest.get("_integrity_available"):
+        logger.info("   Integridade SHA256 validada para artefatos do manifesto.")
+    elif strict_integrity:
+        logger.warning(
+            "   Manifesto sem hashes SHA256 (modo legado). Integridade nao foi validada."
+        )
+
+    # Carregar scaler principal do treino (NUNCA re-ajustar)
+    if scaler is None:
+        scaler_path = os.path.join(models_dir, "scaler.joblib")
+        if not os.path.exists(scaler_path):
+            raise FileNotFoundError(
+                f"Scaler principal nao encontrado: {scaler_path}. "
+                "Execute run_experiment() primeiro para treinar os modelos."
+            )
+        df = proc.transform_scaler(df, scaler_path=scaler_path)
+        logger.info(f"   Scaler carregado de {scaler_path} (sem re-ajuste)")
+    else:
+        proc.scaler = scaler
+        df = proc.transform_scaler(df)
+        logger.info("   Scaler carregado via manifesto (sem re-ajuste)")
 
     iso_features = get_features_for_model("isolation_forest", df.columns.tolist())
     hbos_features = get_features_for_model("hbos", df.columns.tolist())
@@ -170,15 +361,21 @@ def predict(
     x_iso = df[iso_features].values
     x_hbos = df[hbos_features].values
 
+    # Dois scalers: scaler.joblib (ISO/HBOS) e gru_scaler.joblib (Temporal).
+    # Ver config/feature_config.py para explicacao do motivo da separacao.
     # GRU Scaler separado (lat/lon)
-    gru_scaler_path = os.path.join(models_dir, "gru_scaler.joblib")
-    if os.path.exists(gru_scaler_path):
-        gru_scaler = joblib.load(gru_scaler_path)
+    if gru_scaler is not None:
         x_gru = gru_scaler.transform(df[gru_features].values)
-        logger.info(f"   GRU Scaler carregado de {gru_scaler_path}")
+        logger.info("   GRU Scaler carregado via manifesto")
     else:
-        logger.warning("gru_scaler.joblib nao encontrado. GRU nao sera executado.")
-        x_gru = None
+        gru_scaler_path = os.path.join(models_dir, "gru_scaler.joblib")
+        if os.path.exists(gru_scaler_path):
+            gru_scaler = joblib.load(gru_scaler_path)
+            x_gru = gru_scaler.transform(df[gru_features].values)
+            logger.info(f"   GRU Scaler carregado de {gru_scaler_path}")
+        else:
+            logger.warning("gru_scaler.joblib nao encontrado. GRU nao sera executado.")
+            x_gru = None
 
     # 4. Scores ISO
     logger.info("ETAPA 4: Scores Isolation Forest")
@@ -186,13 +383,7 @@ def predict(
     thresholds_loaded = load_thresholds(models_dir, percentile)
     optimizer = ThresholdOptimizer([percentile])
 
-    for model_info in manifest.get("iso", []):
-        model_path = _resolve_path(models_dir, model_info["path"])
-        model_name = model_info["name"]
-        if not os.path.exists(model_path):
-            logger.warning(f"Modelo nao encontrado: {model_path}")
-            continue
-        iso_model = joblib.load(model_path)
+    for model_name, iso_model in iso_models.items():
         scores = -iso_model.score_samples(x_iso)
         tag = model_name
         df[f"{tag}_score"] = scores
@@ -212,13 +403,7 @@ def predict(
 
     # 5. Scores HBOS
     logger.info("ETAPA 5: Scores HBOS")
-    for model_info in manifest.get("hbos", []):
-        model_path = _resolve_path(models_dir, model_info["path"])
-        model_name = model_info["name"]
-        if not os.path.exists(model_path):
-            logger.warning(f"Modelo nao encontrado: {model_path}")
-            continue
-        hbos_model = joblib.load(model_path)
+    for model_name, hbos_model in hbos_models.items():
         scores = hbos_model.decision_function(x_hbos)
         tag = model_name
         df[f"{tag}_score"] = scores
@@ -234,7 +419,7 @@ def predict(
             logger.warning(f"   {tag}: threshold calculado nos novos dados (degradado)")
 
     # 6. Scores Temporal (GRU)
-    if x_gru is not None and manifest.get("temporal"):
+    if x_gru is not None and temporal_entries:
         logger.info("ETAPA 6: Scores Temporal (GRU Autoencoder)")
         temporal_config = config.get("parametros", {}).get("temporal", {})
         window_size = temporal_config.get("window_size", 3)
@@ -251,11 +436,11 @@ def predict(
             max_gap_seconds=gap_seconds,
             arch_type=temporal_config.get("arch_type", "gru"),
         )
-        x_seq_all, indices_all = temporal_pipe.create_sequences_with_index()
+        x_seq_all, indices_all, _ = temporal_pipe.create_sequences_with_index()
 
-        for model_info in manifest.get("temporal", []):
-            model_path = _resolve_path(models_dir, model_info["path"])
-            model_name = model_info["name"]
+        for model_info in temporal_entries:
+            model_path = model_info["path"]
+            model_name = model_info["tag"]
             if not os.path.exists(model_path):
                 logger.warning(f"Modelo temporal nao encontrado: {model_path}")
                 continue
@@ -332,8 +517,22 @@ if __name__ == "__main__":
     )
     parser.add_argument("--input", required=True, help="Dados novos (.csv ou .parquet)")
     parser.add_argument("--config", default="config_mapeamento.yaml")
-    parser.add_argument("--output", default="outputs_inference")
+    parser.add_argument(
+        "--output",
+        "--output-dir",
+        dest="output",
+        default="outputs_inference",
+        help="Diretorio de saida da inferencia",
+    )
     parser.add_argument("--percentile", type=int, default=95)
+    parser.add_argument(
+        "--allow-legacy-manifest",
+        action="store_true",
+        help=(
+            "Permite manifesto sem hashes SHA256 (compatibilidade com runs antigas). "
+            "Quando nao informado, a inferencia exige e valida hashes quando disponiveis."
+        ),
+    )
     args = parser.parse_args()
     predict(
         input_path=args.input,
@@ -341,4 +540,5 @@ if __name__ == "__main__":
         config_path=args.config,
         output_dir=args.output,
         percentile=args.percentile,
+        strict_integrity=not args.allow_legacy_manifest,
     )

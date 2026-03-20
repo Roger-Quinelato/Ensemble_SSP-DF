@@ -6,15 +6,21 @@ the configuration with smaller anomaly-rate shift between training
 reference and validation is preferred.
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 
-from src.utils.logger_utils import logger
+logger = logging.getLogger("sspdf")
 
 
-def compute_val_stability_metrics(df_full, df_val, score_cols, percentile=95):
+def compute_val_stability_metrics(df_train, df_val, score_cols, percentile=95):
     """
-    Compute validation-set stability metrics for configuration selection.
+    Calcula metricas de estabilidade no validation set para selecao de config.
+
+    IMPORTANTE: Usa df_train (apenas treino) como referencia, NAO df_full.
+    df_full nao deve ser passado aqui - isso contaminaria a referencia com dados
+    de teste e tornaria a selecao levemente otimista.
 
     For each score column, computes:
     - anomaly rate in training-reference vs validation
@@ -22,23 +28,20 @@ def compute_val_stability_metrics(df_full, df_val, score_cols, percentile=95):
     - validation score dispersion (IQR)
 
     Args:
-        df_full: Full DataFrame with all score columns.
-        df_val: Validation DataFrame or validation index.
-        score_cols: Score columns to compare.
-        percentile: Percentile used as reference threshold.
+        df_train: DataFrame do periodo de treino APENAS (60% do total).
+        df_val: DataFrame do periodo de validacao (20% do total).
+        score_cols: Colunas de score a avaliar.
+        percentile: Percentil de threshold (default: 95).
     Returns:
-        pd.DataFrame with ranked stability results.
+        pd.DataFrame com ranking de estabilidade.
     """
-    val_idx = df_val.index if hasattr(df_val, "index") else df_val
-    train_mask = ~df_full.index.isin(val_idx)
-
     results = []
     for score_col in score_cols:
-        if score_col not in df_full.columns:
+        if score_col not in df_train.columns or score_col not in df_val.columns:
             continue
 
-        train_scores = df_full.loc[train_mask, score_col].dropna().values
-        val_scores = df_full.loc[val_idx, score_col].dropna().values
+        train_scores = df_train[score_col].dropna().values
+        val_scores = df_val[score_col].dropna().values
 
         if len(train_scores) == 0 or len(val_scores) == 0:
             continue

@@ -67,6 +67,10 @@ FEATURES_HBOS = [
 # =============================================================================
 # FEATURES PARA GRU AUTOENCODER (RECOMENDADO)
 # =============================================================================
+# FEATURES_GRU_AUTOENCODER - Features do detector temporal
+# NOTA: Inclui lat/lon (que NAO estao em FEATURES_ISOLATION_FOREST nem FEATURES_HBOS).
+# Por isso o GRU usa gru_scaler.joblib separado - range de coordenadas
+# ([-16,-15], [-48,-47]) e incompativel com o range de features horarias [-1,1].
 # GRU Autoencoder: Alternativa mais eficiente ao LSTM para window_size ≤ 20
 # Vantagens sobre LSTM:
 # - 25-30% mais rápido no treinamento

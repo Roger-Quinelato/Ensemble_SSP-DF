@@ -84,8 +84,9 @@ def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
     return logger
 
 
-# Logger global do projeto
-logger = setup_logger()
+# Logger global para compatibilidade retroativa.
+# Nao configurar handlers no import; o setup deve ser explicito.
+logger = logging.getLogger("sspdf")
 
 
 def log_execution(func):

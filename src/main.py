@@ -1,4 +1,4 @@
-﻿"""
+"""
 Ponto de entrada do Pipeline de Deteccao de Anomalias (SSP-DF).
 Uso:
     python -m src.main
@@ -8,6 +8,7 @@ Uso:
 
 import argparse
 import datetime
+import logging
 import os
 import random
 import sys
@@ -18,7 +19,8 @@ import numpy as np
 if __package__ is None or __package__ == "":
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.utils.logger_utils import logger
+logger = logging.getLogger("sspdf")
+from src.utils.logger_utils import setup_logger
 
 
 def parse_args():
@@ -42,13 +44,18 @@ def parse_args():
         "--output-dir",
         type=str,
         default="outputs",
-        help="Diretorio base para saida de resultados",
+        help="Diretorio base de output. Sera criado outputs/<run_id>/ dentro deste.",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=5,
-        help="Numero de epocas para treino dos modelos temporais (GRU)",
+        default=None,
+        help=(
+            "Numero de epocas para treino temporal. "
+            "Se nao informado, usa o valor de config_mapeamento.yaml "
+            "(parametros.temporal.epochs). "
+            "Se informado, tem precedencia sobre o YAML."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -73,9 +80,8 @@ def set_global_seed(seed):
 
 def main():
     args = parse_args()
+    setup_logger(name="sspdf")
     if args.verbose:
-        import logging
-
         logging.getLogger("sspdf").setLevel(logging.DEBUG)
     set_global_seed(args.seed)
 
@@ -85,14 +91,6 @@ def main():
     tf.random.set_seed(args.seed)
 
     from src.pipeline.experiment_runner import run_experiment
-    from src.utils.organizacao_arquivos import (
-        compilar_descricoes,
-        mover_arquivos_finais,
-        mover_perfil_json,
-        gerar_metricas_base,
-        gerar_json_carros_por_ra,
-        mover_imagens,
-    )
 
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir_with_run = os.path.join(args.output_dir, run_id)
@@ -107,7 +105,7 @@ def main():
         logger.info(f"Input: {args.input}")
 
     try:
-        run_experiment(
+        output_dir_final = run_experiment(
             config_path=args.config,
             input_path=args.input,
             output_dir=output_dir_with_run,
@@ -116,21 +114,11 @@ def main():
             run_id=run_id,
         )
 
-        # Pos-processamento legado fixo em outputs/. Incompativel com subdiretorios versionados.
-        if output_dir_with_run == "outputs":
-            logger.info("Organizando relatorios...")
-            compilar_descricoes()
-            mover_arquivos_finais()
-            mover_perfil_json()
-            gerar_metricas_base()
-            gerar_json_carros_por_ra()
-            mover_imagens()
-            logger.info("Relatorios compilados e arquivos organizados em outputs/reports/")
-        else:
-            logger.warning(
-                "Pos-processamento em src.utils.organizacao_arquivos foi ignorado "
-                "porque usa caminhos fixos em 'outputs/'."
-            )
+        logger.info(f"Pipeline concluido. Outputs em: {output_dir_final}")
+        if output_dir_final:
+            relatorio = os.path.join(output_dir_final, "relatorio_executivo.html")
+            if os.path.exists(relatorio):
+                logger.info(f"Relatorio HTML disponivel: {relatorio}")
     except KeyboardInterrupt:
         logger.warning("Execucao interrompida pelo usuario.")
         sys.exit(1)

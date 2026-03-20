@@ -1,18 +1,21 @@
-﻿# src/evaluation.py
+# src/evaluation.py
+
+import logging
 
 import numpy as np
 import pandas as pd
 from src.utils.logger_utils import log_execution
-from src.utils.logger_utils import logger
+
+logger = logging.getLogger("sspdf")
 
 class ThresholdOptimizer:
     """
-    Otimiza thresholds de detecÃ§Ã£o usando mÃºltiplos percentis.
-    Ãštil para balancear Precision vs Recall em detecÃ§Ã£o de anomalias.
+    Otimiza thresholds de detecção usando múltiplos percentis.
+    Útil para balancear Precision vs Recall em detecção de anomalias.
     """
     def __init__(self, percentiles=None):
         """
-        Inicializa o otimizador de thresholds para detecÃ§Ã£o de anomalias.
+        Inicializa o otimizador de thresholds para detecção de anomalias.
         Args:
             percentiles (list, opcional): Lista de percentis (0-100). Default: [90, 95, 99].
         """
@@ -25,7 +28,7 @@ class ThresholdOptimizer:
         for p in self.percentiles:
             if not 0 <= p <= 100:
                 raise ValueError(
-                    f"Percentil invÃ¡lido: {p}. Todos devem estar entre 0 e 100."
+                    f"Percentil inválido: {p}. Todos devem estar entre 0 e 100."
                 )
 
     def apply_dynamic_thresholds(self, df, score_col, model_name, calibration_scores=None):
@@ -66,7 +69,7 @@ class ThresholdOptimizer:
         if not_scored_count > 0:
             pct_not_scored = not_scored_count / len(df) * 100
             logger.warning(
-                f"   ATENÇÃO: {not_scored_count:,} registros ({pct_not_scored:.1f}%) "
+                f"   ATENCAO: {not_scored_count:,} registros ({pct_not_scored:.1f}%) "
                 f"não foram avaliados por {model_name} e receberão label NaN (not_scored)."
             )
 
@@ -90,7 +93,7 @@ class ThresholdOptimizer:
             thresh = np.percentile(cal_scores, p)
             col_name = f"{model_name}_p{p}_label"
 
-            # CORREÇÃO CRÍTICA: NaN permanece NaN - não é convertido para 0
+            # CORRECAO CRÍTICA: NaN permanece NaN - não é convertido para 0
             # Registros não avaliados devem ser distinguíveis de registros normais
             df[col_name] = np.where(
                 df[score_col].isna(),

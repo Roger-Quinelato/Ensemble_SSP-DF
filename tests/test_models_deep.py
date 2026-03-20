@@ -16,9 +16,10 @@ def test_create_sequences_with_index():
     pipeline = TemporalAutoencoder(
         X, vehicle_ids, timestamps, original_indices, window_size=3, max_gap_seconds=100
     )
-    X_seq, idx = pipeline.create_sequences_with_index()
+    X_seq, idx_last, idx_first = pipeline.create_sequences_with_index()
     assert X_seq.shape[1:] == (3, 3)
-    assert len(idx) == X_seq.shape[0]
+    assert len(idx_last) == X_seq.shape[0]
+    assert len(idx_first) == X_seq.shape[0]
 
 def test_train_evaluate():
     X = np.random.rand(20, 3)

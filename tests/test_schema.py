@@ -40,10 +40,14 @@ def test_invalid_latitude():
         validate_input(df)
 
 
-def test_too_few_records():
-    df = _make_valid_df(10)  # Menos de 100
-    with pytest.raises(Exception):
-        validate_input(df)
+def test_small_sample_is_allowed():
+    """
+    Schema atual permite micro-batches (>=1 registro).
+    Isso garante que amostra_ssp.csv pequena funcione como padrao.
+    """
+    df = _make_valid_df(10)
+    result = validate_input(df)
+    assert len(result) == 10
 
 
 def test_future_timestamp():

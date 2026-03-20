@@ -199,7 +199,7 @@ class TestEnsembleDecision:
         )
 
     def test_ensemble_vote_pct_is_majority(self):
-        """ensemble_vote_pct deve ser proporção de votos anomalia."""
+        """ensemble_vote_pct deve refletir a media das familias disponiveis."""
         try:
             from src.utils.ensemble_decision import compute_ensemble_decision
         except ImportError:
@@ -208,10 +208,10 @@ class TestEnsembleDecision:
         df = self._make_df_with_labels()
         df_result = compute_ensemble_decision(df, percentile=95)
 
-        # Linha 0: 2 de 3 modelos votaram anomalia (Temporal é NaN) -> 2/3 ~= 0.667
+        # Linha 0: vote_iso=1.0, vote_hbos=0.0, vote_temp=NaN -> media familias = 0.5
         vote_pct = df_result.loc[0, "ensemble_vote_pct"]
-        assert abs(vote_pct - 2 / 3) < 0.01, (
-            f"ensemble_vote_pct esperado ~0.667, obtido {vote_pct}"
+        assert abs(vote_pct - 0.5) < 0.01, (
+            f"ensemble_vote_pct esperado ~0.5, obtido {vote_pct}"
         )
 
     def test_n_models_scored_counts_non_nan(self):
@@ -229,6 +229,31 @@ class TestEnsembleDecision:
             f"n_models_scored esperado 3, obtido {df_result.loc[0, 'n_models_scored']}"
         )
 
+    def test_family_votes_balance_temporal_dominance(self):
+        """Mesmo com muitos modelos temporais, cada familia deve pesar igual."""
+        try:
+            from src.utils.ensemble_decision import compute_ensemble_decision
+        except ImportError:
+            pytest.skip("ensemble_decision.py não encontrado")
+
+        df = pd.DataFrame(
+            {
+                "ISO_n100_p95_label": [1.0],
+                "HBOS_bins10_p95_label": [1.0],
+                "Temporal_A_p95_label": [0.0],
+                "Temporal_B_p95_label": [0.0],
+                "Temporal_C_p95_label": [0.0],
+                "Temporal_D_p95_label": [0.0],
+                "Temporal_E_p95_label": [0.0],
+            }
+        )
+        df_result = compute_ensemble_decision(df, percentile=95)
+        assert df_result.loc[0, "vote_iso"] == 1.0
+        assert df_result.loc[0, "vote_hbos"] == 1.0
+        assert df_result.loc[0, "vote_temp"] == 0.0
+        assert abs(df_result.loc[0, "ensemble_vote_pct"] - (2 / 3)) < 0.01
+        assert df_result.loc[0, "ensemble_alert"] == 1.0
+
 
 # =============================================================================
 # TESTES model_selection.py (se FIX H2 aplicado)
@@ -244,15 +269,20 @@ class TestModelSelection:
         except ImportError:
             pytest.skip("model_selection.py não encontrado")
 
-        df_full = pd.DataFrame(
+        df_train = pd.DataFrame(
             {
-                "ISO_n100_score": [0.1, 0.2, 0.3, 0.4, 0.7, 0.8],
-                "HBOS_bins10_score": [1.0, 1.1, 1.2, 1.3, 2.0, 2.2],
+                "ISO_n100_score": [0.1, 0.2, 0.3, 0.4],
+                "HBOS_bins10_score": [1.0, 1.1, 1.2, 1.3],
             }
         )
-        df_val = df_full.iloc[4:].copy()
+        df_val = pd.DataFrame(
+            {
+                "ISO_n100_score": [0.7, 0.8],
+                "HBOS_bins10_score": [2.0, 2.2],
+            }
+        )
         df_sel = compute_val_stability_metrics(
-            df_full=df_full,
+            df_train=df_train,
             df_val=df_val,
             score_cols=["ISO_n100_score", "HBOS_bins10_score"],
             percentile=95,
@@ -270,10 +300,10 @@ class TestModelSelection:
         except ImportError:
             pytest.skip("model_selection.py não encontrado")
 
-        df_full = pd.DataFrame({"ISO_n100_score": [0.1, 0.2, 0.3, 0.4]})
-        df_val = df_full.iloc[2:].copy()
+        df_train = pd.DataFrame({"ISO_n100_score": [0.1, 0.2]})
+        df_val = pd.DataFrame({"ISO_n100_score": [0.3, 0.4]})
         df_sel = compute_val_stability_metrics(
-            df_full=df_full,
+            df_train=df_train,
             df_val=df_val,
             score_cols=["ISO_n100_score", "HBOS_missing_score"],
             percentile=95,
