@@ -191,6 +191,8 @@ Testes que dependem de artefatos de run prévia:
 - `tests/test_manifest_portability.py`
 
 ## Docker
+> Nota de validacao: o Docker nao foi validado localmente neste ambiente por indisponibilidade de engine (`docker` nao instalado/ativo no host de validacao).
+
 Build:
 ```bash
 docker build -t sspdf-anomalias .
