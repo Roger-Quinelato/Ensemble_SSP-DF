@@ -66,6 +66,69 @@ Parâmetros CLI (`src/main.py`):
 | `--seed` | `42` | Seed global de reprodutibilidade. |
 | `--verbose` | `False` | Ativa logs em nível debug. |
 
+## Guia de Hiperparâmetros
+O pipeline foi desenhado para que a maior parte dos ajustes operacionais seja feita no YAML (`config_mapeamento.yaml`), e nao no codigo. O parametro mais sensivel no dia a dia costuma ser `epochs`, mas ele nao deve ser alterado isoladamente: o efeito real depende da janela temporal, do volume de dados por veiculo e da cobertura de sequencias validas.
+
+### Como `--epochs` funciona na pratica
+- Se `--epochs` for informado na CLI, ele tem precedencia sobre o YAML.
+- Se `--epochs` nao for informado, o pipeline usa `parametros.temporal.epochs` do arquivo de configuracao.
+- No estado atual do projeto, o valor padrao operacional no YAML e `5`.
+
+Exemplos reais:
+```bash
+python -m src.main --epochs 1
+python -m src.main --epochs 10 --seed 42
+python -m src.main --config config_mapeamento.yaml
+```
+
+Leitura operacional:
+- `epochs=1`: smoke test, validacao rapida de fluxo e geracao de artefatos.
+- `epochs=5`: baseline atual do projeto; bom equilibrio entre custo e estabilidade.
+- `epochs>5`: util quando ha mais dados e cobertura temporal suficiente, mas aumenta tempo de treino e pode ampliar risco de overfitting em bases pequenas.
+
+### Parametros centrais do YAML
+Valores atuais em `config_mapeamento.yaml`:
+- `parametros.split_ratios`: `train=0.6`, `validation=0.2`, `test=0.2`
+- `parametros.percentis_teste`: `[90, 95, 99]`
+- `parametros.isolation_forest.n_estimators`: `[100, 200]`
+- `parametros.hbos.n_bins`: `[10, 20]`
+- `parametros.temporal.arch_type`: `gru`
+- `parametros.temporal.window_size`: `3`
+- `parametros.temporal.epochs`: `5`
+- `parametros.temporal.batch_size`: `64`
+- `parametros.temporal.dropout`: `0.2`
+- `configuracoes_gerais.gap_segmentation_seconds`: `1800`
+
+### O que cada parametro muda
+| Parametro | Efeito principal | Quando ajustar |
+|---|---|---|
+| `epochs` | Numero de passagens de treino do modelo temporal | Ajuste fino de convergencia do GRU |
+| `window_size` | Tamanho da sequencia temporal | Quando o padrao anomalo depende de janelas mais curtas ou mais longas |
+| `gap_segmentation_seconds` | Quebra sequencias com gaps longos | Quando a frequencia de GPS muda entre ambientes |
+| `n_estimators` (ISO) | Robustez e custo computacional do Isolation Forest | Quando quiser comparar estabilidade de variantes ISO |
+| `n_bins` (HBOS) | Granularidade dos histogramas do HBOS | Quando quiser comparar sensibilidade local do HBOS |
+| `percentis_teste` | Thresholds operacionais de alerta | Quando precisar calibrar severidade de triagem |
+| `seed` | Reprodutibilidade da execucao | Deve permanecer fixo em producao para auditoria |
+
+### Recomendacoes de uso
+- Para validar instalacao, CI local ou estrutura de outputs: usar `--epochs 1`.
+- Para treino operacional reprodutivel: manter `--seed 42` e registrar sempre o `run_id`.
+- Para comparar configuracoes: alterar um grupo de parametros por vez e comparar `runs_index.csv`, `model_selection_val.csv` e `models_manifest.json`.
+- Para bases pequenas ou com baixa cobertura temporal: nao aumentar `epochs` antes de verificar quantas sequencias validas o GRU realmente conseguiu formar.
+
+### O que observar no log
+Durante o treino, os logs relevantes para diagnostico sao:
+- `--epochs nao informado. Usando valor do YAML: ...`
+- `--epochs=<N> (explicito via CLI). Valor do YAML (...) ignorado.`
+- `Sequencias criadas: ...`
+- `Sequencias de treino STRICT (todos elementos no treino): ...`
+- `Thresholds calibrados no TREINO para ...`
+
+Essas mensagens ajudam a responder, em auditoria, tres perguntas importantes:
+- qual configuracao efetivamente foi usada;
+- quanto dado temporal foi realmente treinavel;
+- em que distribuicao os thresholds foram calibrados.
+
 ## Outputs Gerados
 Estrutura por execução:
 ```text
@@ -89,6 +152,9 @@ Artefatos principais:
 | `execution.log` | `outputs/<run_id>/metrics/` | Log textual da execução. |
 | `vehicle_risk_ranking.csv` | `outputs/<run_id>/metrics/` | Ranking de risco por veículo. |
 | `vehicle_coverage_report.csv` | `outputs/<run_id>/metrics/` | Cobertura de avaliação por veículo. |
+| `relatorio_executivo.html` | `outputs/<run_id>/` | Relatório visual consolidado para leitura executiva e auditoria. |
+
+O artefato mais adequado para apresentação institucional costuma ser `outputs/<run_id>/relatorio_executivo.html`, porque ele resume KPIs, ranking de veículos, concordância, cobertura e limitações metodológicas em um único documento.
 
 ## Inferência em Dados Novos
 Comando real (`src/pipeline/inference.py`):
@@ -111,6 +177,38 @@ Modos de operação:
 Temporal na inferência:
 - Se `gru_scaler.joblib` ausente, a família temporal é pulada com warning.
 - A inferência continua com ISO/HBOS (sem abortar).
+
+## Relatório HTML Executivo
+Ao final do treinamento, o pipeline tenta gerar automaticamente:
+
+```text
+outputs/<run_id>/relatorio_executivo.html
+```
+
+Como abrir:
+- navegador local (Chrome, Edge ou equivalente);
+- sem depender de notebook, planilha ou ferramenta externa para leitura inicial.
+
+O que o relatório contém:
+- KPIs consolidados da run;
+- total de alertas e taxa de alerta;
+- ranking de risco por veículo;
+- cobertura de avaliação, incluindo cobertura temporal;
+- distribuições de score por família de modelo;
+- matriz de concordância entre modelos;
+- seção metodológica com disclaimers explícitos;
+- referência ao `run_id` da execução.
+
+Como interpretar corretamente:
+- `ensemble_alert = 1` significa que o registro foi considerado anômalo pelo ensemble configurado; nao significa confirmação de irregularidade.
+- ausência de alerta nao equivale a normalidade comprovada.
+- cobertura temporal inferior a 100% significa que parte dos registros nao formou sequência suficiente para o GRU.
+- concordância entre modelos mede consistência interna, nao performance supervisionada.
+
+Limitação interpretativa:
+- o relatório é um artefato de triagem analítica e apoio à decisão;
+- ele não substitui validação supervisionada, anotação humana ou confirmação operacional em campo;
+- sem ground truth rotulado, os gráficos e métricas devem ser lidos como evidência estatística e de rastreabilidade, não como prova de acurácia final.
 
 ## Contrato de Artefatos
 Obrigatórios para inferência:
