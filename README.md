@@ -1,4 +1,4 @@
-﻿# Ensemble_SSP-DF
+# Ensemble_SSP-DF
 
 ## Objetivo
 Este repositório implementa um pipeline de detecção de anomalias veiculares para apoio analítico e operacional da SSP-DF.
@@ -20,7 +20,7 @@ O treinamento completo (`python -m src.main`) executa 5 etapas:
 5. Exportação de artefatos: thresholds, manifesto, parquet final e relatório HTML.
 
 ## Diagrama da Arquitetura Operacional
-O diagrama abaixo representa o fluxo efetivamente executado pelo projeto, incluindo treino, persistência de artefatos, inferência e camada de auditoria:
+O diagrama abaixo cobre as sete camadas do sistema — da ingestão de dados brutos até a camada de auditoria — com todas as variantes de modelo, contratos de artefato e modos de inferência.
 
 ```mermaid
 flowchart TD
