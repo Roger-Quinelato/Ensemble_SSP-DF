@@ -25,4 +25,5 @@ RUN mkdir -p data/input
 
 # Ponto de entrada correto
 USER sspdf
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 CMD python -c "import src.main" || exit 1
 CMD ["python", "-m", "src.main"]

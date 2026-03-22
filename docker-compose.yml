@@ -2,8 +2,6 @@ services:
   train:
     build: .
     image: sspdf-anomalias
-    env_file:
-      - .env
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
@@ -11,8 +9,6 @@ services:
   infer:
     build: .
     image: sspdf-anomalias
-    env_file:
-      - .env
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
@@ -21,8 +17,8 @@ services:
       - -m
       - src.pipeline.inference
       - --models-dir
-      - /app/outputs/${RUN_ID}/models_saved
+      - /app/outputs/${RUN_ID:-20260320_144331}/models_saved
       - --input
-      - /app/data/input/${INPUT_FILE}
+      - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
       - --output
-      - /app/outputs/inference_${RUN_ID}
+      - /app/outputs/${INFER_OUTPUT_DIR:-inference_output}
