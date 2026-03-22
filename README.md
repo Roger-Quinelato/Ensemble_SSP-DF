@@ -24,79 +24,34 @@ O diagrama abaixo cobre as sete camadas do sistema — da ingestão de dados bru
 
 ```mermaid
 flowchart TD
-    A["`src/main.py`
-    CLI: --config, --input, --output-dir, --epochs, --seed"] --> B["`run_experiment()`
-    `src/pipeline/experiment_runner.py`"]
+    A["src/main.py<br/>CLI: --config, --input, --output-dir, --epochs, --seed"] --> B["run_experiment()<br/>src/pipeline/experiment_runner.py"]
 
-    B --> C["Carga padronizada
-    `DataProcessor.load_and_standardize()`
-    + `validate_input()`"]
-    C --> D["Split temporal 60/20/20
-    treino / validacao / teste"]
-    D --> E["Feature engineering por particao
-    + alinhamento de colunas `RA_*`
-    + `scaler.joblib`"]
-    E --> F["Preparacao por familia
-    ISO / HBOS / GRU
-    + `gru_scaler.joblib`"]
+    B --> C["Carga padronizada<br/>DataProcessor.load_and_standardize()<br/>+ validate_input()"]
+    C --> D["Split temporal 60/20/20<br/>treino / validacao / teste"]
+    D --> E["Feature engineering por particao<br/>+ alinhamento de colunas RA_*<br/>+ scaler.joblib"]
+    E --> F["Preparacao por familia<br/>ISO / HBOS / GRU<br/>+ gru_scaler.joblib"]
 
-    F --> G["Modelos base
-    `BaselineModels`
-    `iso_n*.joblib`
-    `hbos_bins*.joblib`"]
-    G --> H["Thresholds por treino
-    p90 / p95 / p99"]
-    G --> I["Mascaras de inlier
-    para cenarios temporais"]
+    F --> G["Modelos base<br/>BaselineModels<br/>iso_n*.joblib<br/>hbos_bins*.joblib"]
+    G --> H["Thresholds por treino<br/>p90 / p95 / p99"]
+    G --> I["Mascaras de inlier<br/>para cenarios temporais"]
 
-    I --> J["Modelos temporais
-    `TemporalAutoencoder`
-    cenarios Union / Inter / Baseline
-    `temporal_*.h5`"]
+    I --> J["Modelos temporais<br/>TemporalAutoencoder<br/>cenarios Union / Inter / Baseline<br/>temporal_*.h5"]
     J --> H
 
-    H --> K["`export_results()`
-    ensemble por familia
-    ranking por veiculo
-    concordancia
-    estabilidade em validacao"]
-    K --> L["`outputs/<run_id>/models_saved`
-    manifesto + hashes SHA256
-    scalers + thresholds + modelos"]
-    K --> M["`outputs/<run_id>/metrics`
-    `execution.log`
-    `run_summary.json`
-    `perfil_dados.json`
-    `concordancia_modelos.csv`
-    `vehicle_risk_ranking.csv`
-    `vehicle_coverage_report.csv`
-    `model_selection_val.csv`"]
-    K --> N["`outputs/<run_id>/master_table`
-    `resultado_final.parquet`"]
-    K --> O["`src/outputs/report_generator.py`
-    `relatorio_executivo.html`"]
-    K --> P["`outputs/runs_index.csv`"]
+    H --> K["export_results()<br/>ensemble por familia<br/>ranking por veiculo<br/>concordancia<br/>estabilidade em validacao"]
+    K --> L["outputs/[run_id]/models_saved<br/>manifesto + hashes SHA256<br/>scalers + thresholds + modelos"]
+    K --> M["outputs/[run_id]/metrics<br/>execution.log<br/>run_summary.json<br/>perfil_dados.json<br/>concordancia_modelos.csv<br/>vehicle_risk_ranking.csv<br/>vehicle_coverage_report.csv<br/>model_selection_val.csv"]
+    K --> N["outputs/[run_id]/master_table<br/>resultado_final.parquet"]
+    K --> O["src/outputs/report_generator.py<br/>relatorio_executivo.html"]
+    K --> P["outputs/runs_index.csv"]
 
-    L --> Q["`src/pipeline/inference.py`
-    carrega manifesto, scalers, thresholds e modelos"]
-    Q --> R["Inferencia oficial
-    usa thresholds do treino
-    valida hash quando disponivel"]
-    Q --> S["Compatibilidade / degradado
-    sem manifesto: descobre por nome
-    sem thresholds: recalibra nos dados novos
-    sem `gru_scaler`: pula familia temporal"]
-    R --> T["`outputs_inference/`
-    `inference_result.parquet`
-    `metrics/alertas_ensemble.csv`
-    `metrics/vehicle_risk_ranking.csv`"]
+    L --> Q["src/pipeline/inference.py<br/>carrega manifesto, scalers, thresholds e modelos"]
+    Q --> R["Inferencia oficial<br/>usa thresholds do treino<br/>valida hash quando disponivel"]
+    Q --> S["Compatibilidade / degradado<br/>sem manifesto: descobre por nome<br/>sem thresholds: recalibra nos dados novos<br/>sem gru_scaler: pula familia temporal"]
+    R --> T["outputs_inference/<br/>inference_result.parquet<br/>metrics/alertas_ensemble.csv<br/>metrics/vehicle_risk_ranking.csv"]
     S --> T
 
-    M --> U["Suite de testes
-    contrato de artefatos
-    regressao semantica
-    smoke de relatorio
-    treino -> inferencia"]
+    M --> U["Suite de testes<br/>contrato de artefatos<br/>regressao semantica<br/>smoke de relatorio<br/>treino -> inferencia"]
     L --> U
     N --> U
     O --> U
