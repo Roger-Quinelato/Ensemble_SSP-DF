@@ -1,0 +1,24 @@
+services:
+  train:
+    build: .
+    image: sspdf-anomalias
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+
+  infer:
+    build: .
+    image: sspdf-anomalias
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    command:
+      - python
+      - -m
+      - src.pipeline.inference
+      - --models-dir
+      - /app/outputs/${RUN_ID:-20260320_144331}/models_saved
+      - --input
+      - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
+      - --output
+      - /app/outputs/${INFER_OUTPUT_DIR:-inference_output}

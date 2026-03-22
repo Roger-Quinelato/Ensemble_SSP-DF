@@ -1,21 +1,17 @@
 # src/data/data_processor.py
 
+import logging
+import os
+
 import pandas as pd
 import numpy as np
-import yaml
 import holidays
 from sklearn.preprocessing import StandardScaler
 import joblib as _joblib
+from src.data.schema import validate_input
 from src.utils.logger_utils import log_execution
-from src.utils.logger_utils import logger
 
-# Tenta carregar config de forma segura
-try:
-    with open("config_mapeamento.yaml", "r") as config_file:
-        CONFIG = yaml.safe_load(config_file)
-except Exception:
-    CONFIG = {}
-
+logger = logging.getLogger("sspdf")
 
 class DataProcessor:
     """
@@ -52,15 +48,26 @@ class DataProcessor:
 
         df = df.rename(columns=self.map_cols)
 
-        # Garantir Tipagem
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # Garantir tipagem quando a coluna existir
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
         # Corrigido: usar nome padronizado das colunas, não o mapeamento original
         for col in ["latitude", "longitude"]:
             if col in df.columns:
                 df[col] = df[col].astype(float)
 
-        df = df.dropna(subset=["timestamp", "placa"])
+        if {"timestamp", "placa"}.issubset(df.columns):
+            df = df.dropna(subset=["timestamp", "placa"])
+
+        # Validar schema de entrada
+        try:
+            df = validate_input(df)
+            logger.info("✅ Schema de entrada validado com sucesso")
+        except Exception as e:
+            logger.error(f"❌ Falha na validação de schema: {e}")
+            logger.error("Verifique se os dados de entrada seguem o formato esperado.")
+            raise
 
         return df
 
@@ -79,9 +86,12 @@ class DataProcessor:
     @log_execution
     def feature_engineering(self, df):
         """
-        Cria features numéricas e aplica One-Hot Encoding (Get Dummies).
+        Cria features numericas e aplica One-Hot Encoding.
+
+        Returns:
+            tuple: (DataFrame com features, lista de features criadas)
         """
-        self.features_to_use = []  # Reinicia a lista
+        features_created = []  # lista local, evita side-effects entre particoes
 
         # 1. Features Temporais
         df["hora"] = df["timestamp"].dt.hour
@@ -90,19 +100,16 @@ class DataProcessor:
         # Ciclicidade de hora
         df["hora_sin"] = np.sin(2 * np.pi * df["hora"] / 24)
         df["hora_cos"] = np.cos(2 * np.pi * df["hora"] / 24)
-
-        self.features_to_use.extend(["hora_sin", "hora_cos", "dia_sem"])
+        features_created.extend(["hora_sin", "hora_cos", "dia_sem"])
 
         # 2. Features de Contexto (Feriados)
         br_holidays = holidays.BR(state="DF")
-
         df["eh_feriado"] = df["timestamp"].dt.date.apply(
             lambda d: 1 if d in br_holidays else 0
         )
+        features_created.append("eh_feriado")
 
-        self.features_to_use.append("eh_feriado")
-
-        # 3. Features Espaciais (Velocidade/Aceleração)
+        # 3. Features Espaciais (Velocidade/Aceleracao)
         if "latitude" in df.columns and "longitude" in df.columns:
             # Sort para garantir ordem temporal
             df = df.sort_values(["placa", "timestamp"])
@@ -111,12 +118,12 @@ class DataProcessor:
             df["lon_prev"] = df.groupby("placa")["longitude"].shift(1)
             df["time_prev"] = df.groupby("placa")["timestamp"].shift(1)
 
-            # Calcular distância Haversine
+            # Calcular distancia Haversine
             dist = self._haversine_vectorized(
                 df["latitude"].values,
                 df["longitude"].values,
                 df["lat_prev"].fillna(df["latitude"]).values,
-                df["lon_prev"].fillna(df["longitude"]).values
+                df["lon_prev"].fillna(df["longitude"]).values,
             )
             df["dist_m"] = pd.Series(dist, index=df.index).fillna(0)
 
@@ -131,40 +138,57 @@ class DataProcessor:
                 0, np.nan
             )
             df["velocidade_kmh"] = df["velocidade_kmh"].fillna(0)
-            
-            self.features_to_use.extend(["velocidade_kmh", "dist_m"])
+            features_created.extend(["velocidade_kmh", "dist_m"])
 
-            # Aceleração
+            # Aceleracao
             df["vel_prev"] = df.groupby("placa")["velocidade_kmh"].shift(1)
             df["aceleracao"] = (
                 (df["velocidade_kmh"] - df["vel_prev"]) * 1000 / 3600
             ) / df["delta_time_s"].replace(0, np.nan)
             df["aceleracao"] = df["aceleracao"].fillna(0)
+            features_created.append("aceleracao")
 
-            self.features_to_use.append("aceleracao")
+            # Limpar colunas temporarias
+            df = df.drop(
+                columns=[
+                    "lat_prev",
+                    "lon_prev",
+                    "time_prev",
+                    "vel_prev",
+                    "delta_time_s",
+                    "delta_time_h",
+                ],
+                errors="ignore",
+            )
 
-            # Limpar colunas temporárias
-            df = df.drop(columns=["lat_prev", "lon_prev", "time_prev", "vel_prev", 
-                                   "delta_time_s", "delta_time_h"], errors="ignore")
-
-        # 4. Região Administrativa (COM GET_DUMMIES)
+        # 4. Regiao Administrativa (COM GET_DUMMIES)
         if "regiao_adm" in df.columns:
             df = pd.get_dummies(df, columns=["regiao_adm"], prefix="RA")
-
-            # Identificar novas colunas criadas
             new_cols = [c for c in df.columns if c.startswith("RA_")]
-            self.features_to_use.extend(new_cols)
+            features_created.extend(new_cols)
 
-        # Drop NaNs apenas nas colunas essenciais
-        if self.features_to_use:
-            # Verificar quais features existem no DataFrame
-            existing_features = [f for f in self.features_to_use if f in df.columns]
-            if existing_features:
-                df = df.dropna(subset=existing_features)
+        existing_features = [f for f in features_created if f in df.columns]
+        if existing_features:
+            df = df.dropna(subset=existing_features)
 
-        return df
+        # Compatibilidade retroativa: definir automaticamente apenas na primeira chamada.
+        if not self.features_to_use:
+            self.features_to_use = existing_features
 
-    def fit_scaler(self, df, output_path="outputs/models_saved/scaler.joblib"):
+        return df, existing_features
+
+    def _validate_models_saved_path(self, path):
+        """Garante que o artefato seja salvo/carregado apenas em um diretorio models_saved."""
+        normalized = os.path.normpath(path)
+        parent = os.path.basename(os.path.dirname(normalized))
+        if parent != "models_saved":
+            raise ValueError(
+                "Governanca bloqueou caminho fora de models_saved: "
+                f"{path}. Use outputs/<run_id>/models_saved/."
+            )
+        return normalized
+
+    def fit_scaler(self, df, output_path=None):
         """
         Ajusta o StandardScaler APENAS nos dados de treino e serializa para disco.
         DEVE ser chamado APENAS com dados de treino (split temporal).
@@ -179,6 +203,18 @@ class DataProcessor:
             raise ValueError(
                 "features_to_use está vazio. Execute feature_engineering() primeiro."
             )
+
+        if output_path is None:
+            models_dir = getattr(self, "models_dir", None)
+            if not models_dir:
+                raise ValueError(
+                    "models_dir nao definido no DataProcessor. "
+                    "Defina proc.models_dir='outputs/<run_id>/models_saved' antes de fit_scaler()."
+                )
+            output_path = os.path.join(models_dir, "scaler.joblib")
+
+        output_path = self._validate_models_saved_path(output_path)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         existing_features = [f for f in self.features_to_use if f in df.columns]
 
@@ -212,7 +248,14 @@ class DataProcessor:
         """
         if self.scaler is None:
             if scaler_path is None:
-                scaler_path = "outputs/models_saved/scaler.joblib"
+                models_dir = getattr(self, "models_dir", None)
+                if not models_dir:
+                    raise ValueError(
+                        "models_dir nao definido no DataProcessor. "
+                        "Defina proc.models_dir='outputs/<run_id>/models_saved' ou passe scaler_path."
+                    )
+                scaler_path = os.path.join(models_dir, "scaler.joblib")
+            scaler_path = self._validate_models_saved_path(scaler_path)
             self.scaler = _joblib.load(scaler_path)
             logger.info(f"   📂 Scaler carregado de {scaler_path}")
 

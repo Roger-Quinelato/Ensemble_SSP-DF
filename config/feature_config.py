@@ -34,35 +34,43 @@ FEATURES_ISOLATION_FOREST = [
 # =============================================================================
 # FEATURES PARA HBOS (Histogram-Based Outlier Score)
 # =============================================================================
-# HBOS assume independência entre features e usa histogramas univariados.
-# Funciona melhor com:
-# - Poucas features (5-10 idealmente)
-# - Features contínuas com distribuições claras
-# - Features independentes entre si
-# - Sem one-hot encoding (cria bins esparsos)
-# Estratégia: Features SELECIONADAS e de alta qualidade
+# HBOS assume INDEPENDENCIA entre features (escore = produto de densidades).
+# REGRAS:
+# 1. Nao incluir features correlacionadas (violam a premissa de independencia).
+# 2. Nao incluir one-hot encoding (bins esparsos em histograma univariado).
+# 3. Maximo de 8-10 features (mais nao melhora e adiciona ruido).
+#
+# EXCLUIDAS INTENCIONALMENTE (apesar de relevantes):
+# - 'aceleracao': derivada de velocidade_kmh -> correlacao estrutural (delta_v/delta_t)
+# - 'dist_m': proporcional a velocidade x delta_t -> correlacao estrutural
+# - 'RA_*': one-hot encoding cria histogramas esparsos
+#
+# INCLUIDAS:
+# - 'velocidade_kmh': principal sinal de comportamento dinamico
+# - 'hora_sin', 'hora_cos': padrao temporal ciclico (independente de velocidade)
+# - 'dia_sem': padrao semanal (independente de velocidade)
+# - 'eh_feriado': contexto de excecao (independente de velocidade)
 
 FEATURES_HBOS = [
-    # Core: Comportamento dinâmico (MAIS IMPORTANTE)
-    'velocidade_kmh',      # Distribuição: normal com caudas longas
-    'aceleracao',          # Distribuição: bimodal (aceleração/frenagem)
-    
-    # Espacial: Continuidade GPS
-    'dist_m',              # Distribuição: exponencial (maioria < 500m)
-    
-    # Temporal: Padrão de atividade
-    'hora',                # Substituído sin/cos - histograma mostra picos claros
-    'dia_sem',             # Discreta - padrão de atividade por dia da semana
-    'eh_feriado',          # Binária - contexto excepcional
-    
-    # Espacial agregado (SE DISPONÍVEL - criar no feature engineering)
-    # 'densidade_trafego_regiao',  # Contínua: veículos/hora na RA
-    # 'distancia_centro_km',        # Contínua: distância do Plano Piloto
+    # === DINAMICA DE MOVIMENTO ===
+    # Manter apenas velocidade: feature mais direta e interpretavel
+    'velocidade_kmh',
+
+    # === CONTEXTO TEMPORAL ===
+    # Independentes da velocidade
+    'hora_sin',
+    'hora_cos',
+    'dia_sem',
+    'eh_feriado',
 ]
 
 # =============================================================================
 # FEATURES PARA GRU AUTOENCODER (RECOMENDADO)
 # =============================================================================
+# FEATURES_GRU_AUTOENCODER - Features do detector temporal
+# NOTA: Inclui lat/lon (que NAO estao em FEATURES_ISOLATION_FOREST nem FEATURES_HBOS).
+# Por isso o GRU usa gru_scaler.joblib separado - range de coordenadas
+# ([-16,-15], [-48,-47]) e incompativel com o range de features horarias [-1,1].
 # GRU Autoencoder: Alternativa mais eficiente ao LSTM para window_size ≤ 20
 # Vantagens sobre LSTM:
 # - 25-30% mais rápido no treinamento
@@ -145,9 +153,7 @@ LSTM_CONFIG = {
 # Features que NÃO devem ser usadas por modelo específico
 
 EXCLUDE_HBOS = [
-    'hora_sin',      # Substituído por 'hora' direta
-    'hora_cos',      # Substituído por 'hora' direta
-    # Todas as RA_* serão excluídas automaticamente
+    # Sem exclusões: hora_sin e hora_cos agora são usados diretamente
 ]
 
 EXCLUDE_ISOLATION_FOREST = [
@@ -231,8 +237,7 @@ def get_feature_importance_order(model_name):
             'hora_sin', 'hora_cos', 'eh_feriado', 'dia_sem'
         ],
         'hbos': [
-            'velocidade_kmh', 'aceleracao', 'dist_m',
-            'hora', 'dia_sem', 'eh_feriado'
+            'velocidade_kmh', 'hora_sin', 'hora_cos', 'dia_sem', 'eh_feriado'
         ],
         'gru': [
             'velocidade_kmh', 'aceleracao', 'latitude', 'longitude',

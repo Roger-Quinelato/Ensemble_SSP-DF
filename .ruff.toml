@@ -1,0 +1,7 @@
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+exclude = ["src/models/models_deep.py", "src/models/models_deep2.py"]
+
+[lint.isort]
+known-first-party = ["src", "config"]

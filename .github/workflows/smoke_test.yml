@@ -1,0 +1,70 @@
+name: Smoke Test - Pipeline Completo (epochs=1)
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PYTHONUNBUFFERED: "1"
+  TF_CPP_MIN_LOG_LEVEL: "3"
+  SSPDF_LOG_DIR: "/tmp/sspdf_logs"
+  SSPDF_DISABLE_TRACKING: "true"
+
+jobs:
+  smoke:
+    name: Smoke Test Pipeline (epochs=1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Gerar dados sinteticos
+        run: |
+          python - <<'EOF'
+          import pandas as pd, numpy as np, os
+          from datetime import datetime, timedelta
+
+          n = 300
+          np.random.seed(42)
+          df = pd.DataFrame({
+              "placa":      [f"ABC{str(i%20).zfill(4)}" for i in range(n)],
+              "timestamp":  [datetime(2024,1,1) + timedelta(minutes=i*15) for i in range(n)],
+              "latitude":   np.random.uniform(-15.9, -15.6, n),
+              "longitude":  np.random.uniform(-47.9, -47.5, n),
+              "regiao_adm": np.random.choice(["Plano Piloto", "Taguatinga"], n),
+          })
+          os.makedirs("data/input", exist_ok=True)
+          df.to_csv("data/input/amostra_ssp.csv", index=False)
+          EOF
+      - name: Rodar pipeline (epochs=1)
+        run: python -m src.main --epochs 1 --output-dir outputs_ci_smoke
+        env:
+          PYTHONPATH: .
+      - name: Verificar outputs gerados
+        run: |
+          python - <<'EOF'
+          import os, sys
+
+          # Verificar que a pasta de output foi criada (run_id e dinamico)
+          subfolders = [f for f in os.listdir("outputs_ci_smoke") if os.path.isdir(f"outputs_ci_smoke/{f}")]
+          if not subfolders:
+              print("ERRO: Nenhum subdiretorio de run criado em outputs_ci_smoke/")
+              sys.exit(1)
+          run_dir = f"outputs_ci_smoke/{subfolders[0]}"
+          required = [
+              f"{run_dir}/master_table/resultado_final.parquet",
+              f"{run_dir}/metrics/perfil_dados.json",
+              f"{run_dir}/metrics/iso_metrics.csv",
+          ]
+          for path in required:
+              if not os.path.exists(path):
+                  print(f"ERRO: {path} nao encontrado")
+                  sys.exit(1)
+              else:
+                  print(f"OK: {path}")
+          print("Smoke test passou.")
+          EOF

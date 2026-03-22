@@ -12,15 +12,18 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
+# Usuario nao-root para execucao
+RUN useradd -m -u 1000 sspdf
+
 # Copiar codigo-fonte
 COPY config_mapeamento.yaml .
 COPY src/ src/
 COPY config/ config/
-COPY tests/ tests/
 
 # Criar diretorios de saida
-RUN mkdir -p data/input outputs/metrics outputs/models_saved \
-    outputs/master_table outputs/logs outputs/reports
+RUN mkdir -p data/input
 
 # Ponto de entrada correto
-CMD ["python", "src/main.py"]
+USER sspdf
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 CMD python -c "import src.main" || exit 1
+CMD ["python", "-m", "src.main"]
