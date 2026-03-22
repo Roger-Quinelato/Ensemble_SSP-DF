@@ -8,3 +8,4 @@ from src.utils.artifact_utils import (
     verify_artifact_strict,
 )
 from src.utils.git_utils import format_model_version, get_git_info
+from src.utils.tf_runtime import configure_tensorflow_runtime

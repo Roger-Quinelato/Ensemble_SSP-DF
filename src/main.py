@@ -4,6 +4,7 @@ Uso:
     python -m src.main
     python -m src.main --input data/input/producao.csv --epochs 50
     python -m src.main --config meu_config.yaml --seed 123
+    python -m src.main --tf-device gpu
 """
 
 import argparse
@@ -21,6 +22,7 @@ if __package__ is None or __package__ == "":
 
 logger = logging.getLogger("sspdf")
 from src.utils.logger_utils import setup_logger
+from src.utils.tf_runtime import configure_tensorflow_runtime
 
 
 def parse_args():
@@ -68,12 +70,23 @@ def parse_args():
         action="store_true",
         help="Habilitar output detalhado",
     )
+    parser.add_argument(
+        "--tf-device",
+        type=str,
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help=(
+            "Dispositivo TensorFlow: auto (usa GPU se houver), "
+            "cpu (forca CPU), gpu (exige GPU visivel)."
+        ),
+    )
     return parser.parse_args()
 
 
 def set_global_seed(seed):
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["TF_DETERMINISTIC_OPS"] = "1"
+    os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
     random.seed(seed)
     np.random.seed(seed)
 
@@ -86,7 +99,7 @@ def main():
     set_global_seed(args.seed)
 
     # Importar TensorFlow DEPOIS de definir variaveis de ambiente e seeds.
-    import tensorflow as tf
+    tf, tf_runtime = configure_tensorflow_runtime(args.tf_device)
 
     tf.random.set_seed(args.seed)
 
@@ -99,6 +112,11 @@ def main():
     logger.info(f"Config: {args.config}")
     logger.info(f"Seed: {args.seed}")
     logger.info(f"Epochs: {args.epochs}")
+    logger.info(f"TensorFlow device mode: {args.tf_device}")
+    logger.info(
+        f"TensorFlow runtime ativo: {tf_runtime['active']} "
+        f"(GPUs detectadas: {tf_runtime['gpu_count']})"
+    )
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Output dir: {output_dir_with_run}")
     if args.input:

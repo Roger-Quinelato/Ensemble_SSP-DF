@@ -8,7 +8,8 @@ Uso:
         --models-dir outputs/<run_id>/models_saved \
         --config config_mapeamento.yaml \
         --input novos_dados.csv \
-        --output outputs_inference/
+        --output outputs_inference/ \
+        --tf-device auto
 """
 
 import argparse
@@ -20,17 +21,16 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
-from tensorflow import keras
 
 from config.feature_config import get_features_for_model
 from src.data.data_processor import DataProcessor
-from src.models.temporal_autoencoder import TemporalAutoencoder
 from src.utils.ensemble_decision import (
     compute_ensemble_decision,
     compute_vehicle_risk_summary,
 )
 from src.utils.evaluation import ThresholdOptimizer
 from src.utils.artifact_utils import verify_artifact_strict
+from src.utils.tf_runtime import configure_tensorflow_runtime
 
 logger = logging.getLogger("sspdf")
 
@@ -292,6 +292,7 @@ def predict(
     output_dir="outputs_inference",
     percentile=95,
     strict_integrity=True,
+    tf_device="auto",
 ):
     """
     Classifica novos dados usando modelos ja treinados.
@@ -302,6 +303,7 @@ def predict(
         config_path: Caminho do YAML de configuracao.
         output_dir: Diretorio para salvar os resultados da inferencia.
         percentile: Percentil a usar para threshold (default: 95).
+        tf_device: Runtime TensorFlow ('auto', 'cpu', 'gpu').
     Returns:
         pd.DataFrame: DataFrame com scores e ensemble_alert.
     """
@@ -327,6 +329,17 @@ def predict(
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
+
+    tf, tf_runtime = configure_tensorflow_runtime(tf_device=tf_device)
+    tf_seed = int(config.get("random_state", 42))
+    tf.random.set_seed(tf_seed)
+    logger.info(
+        f"TensorFlow runtime em inferencia | solicitado={tf_runtime['requested']} "
+        f"| ativo={tf_runtime['active']} | gpus_detectadas={tf_runtime['gpu_count']}"
+    )
+
+    # Importa apos configurar runtime para respeitar modo CPU/GPU.
+    from src.models.temporal_autoencoder import TemporalAutoencoder
 
     # 1. Carregar e validar dados novos
     logger.info("ETAPA 1: Carga e validacao dos novos dados")
@@ -471,7 +484,7 @@ def predict(
             if not os.path.exists(model_path):
                 logger.warning(f"Modelo temporal nao encontrado: {model_path}")
                 continue
-            temporal_model = keras.models.load_model(model_path)
+            temporal_model = tf.keras.models.load_model(model_path)
             if len(x_seq_all) > 0:
                 x_pred = temporal_model.predict(x_seq_all, verbose=0)
                 mse = np.mean(np.power(x_seq_all - x_pred, 2), axis=(1, 2))
@@ -553,6 +566,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--percentile", type=int, default=95)
     parser.add_argument(
+        "--tf-device",
+        type=str,
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help=(
+            "Dispositivo TensorFlow na inferencia: "
+            "auto (usa GPU se houver), cpu (forca CPU), gpu (exige GPU)."
+        ),
+    )
+    parser.add_argument(
         "--allow-legacy-manifest",
         action="store_true",
         help=(
@@ -568,4 +591,5 @@ if __name__ == "__main__":
         output_dir=args.output,
         percentile=args.percentile,
         strict_integrity=not args.allow_legacy_manifest,
+        tf_device=args.tf_device,
     )

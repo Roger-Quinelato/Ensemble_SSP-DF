@@ -24,7 +24,7 @@ O diagrama abaixo cobre as sete camadas do sistema — da ingestão de dados bru
 
 ```mermaid
 flowchart TD
-    A["src/main.py<br/>CLI: --config, --input, --output-dir, --epochs, --seed"] --> B["run_experiment()<br/>src/pipeline/experiment_runner.py"]
+    A["src/main.py<br/>CLI: --config, --input, --output-dir, --epochs, --seed, --tf-device"] --> B["run_experiment()<br/>src/pipeline/experiment_runner.py"]
 
     B --> C["Carga padronizada<br/>DataProcessor.load_and_standardize()<br/>+ validate_input()"]
     C --> D["Split temporal 60/20/20<br/>treino / validacao / teste"]
@@ -69,6 +69,12 @@ Dois scalers são usados por design:
 - `gru_scaler.joblib`: features temporais do GRU (inclui lat/lon).
 
 ## Instalação
+### Clonar o repositório
+```bash
+git clone <url-do-repositorio>
+cd Ensemble_SSP-DF
+```
+
 ### pip
 ```bash
 pip install -r requirements.txt
@@ -90,6 +96,8 @@ Exemplos:
 ```bash
 python -m src.main --input data/input/amostra_ssp.csv
 python -m src.main --epochs 1 --seed 42
+python -m src.main --epochs 1 --tf-device cpu
+python -m src.main --epochs 10 --tf-device gpu
 python -m src.main --output-dir outputs --config config_mapeamento.yaml
 python -m src.main --input <caminho_arquivo.csv> --epochs 10 --seed 123 --output-dir <diretorio_saida>
 ```
@@ -102,7 +110,22 @@ Parâmetros CLI (`src/main.py`):
 | `--output-dir` | `outputs` | Diretório base; a execução cria `outputs/<run_id>/...`. |
 | `--epochs` | `None` | Se ausente, usa `parametros.temporal.epochs` do YAML. |
 | `--seed` | `42` | Seed global de reprodutibilidade. |
+| `--tf-device` | `auto` | Runtime TensorFlow: `auto`, `cpu` (forca CPU) ou `gpu` (exige GPU). |
 | `--verbose` | `False` | Ativa logs em nível debug. |
+
+## Runtime TensorFlow (CPU/GPU)
+O pipeline aceita seleção explícita de dispositivo com `--tf-device`:
+- `auto` (default): usa GPU se detectada, senão CPU.
+- `cpu`: força CPU (modo recomendado para auditoria forense).
+- `gpu`: exige GPU visível; falha de forma explícita se não houver GPU.
+
+Exemplos:
+```bash
+python -m src.main --tf-device auto
+python -m src.main --epochs 10 --tf-device gpu
+python -m src.main --epochs 1 --tf-device cpu
+python -m src.pipeline.inference --models-dir outputs/<run_id>/models_saved --input data/input/amostra_ssp.csv --output outputs/inferencia_<run_id> --tf-device auto
+```
 
 ## Guia Operacional por Modalidade (passo a passo)
 Esta seção consolida o procedimento de execução ponta a ponta em ambiente local: treinamento, validação de artefatos e inferência.
@@ -170,7 +193,8 @@ python -m src.pipeline.inference \
   --models-dir outputs/<run_id>/models_saved \
   --input data/input/amostra_ssp.csv \
   --output outputs/inferencia_<run_id> \
-  --percentile 95
+  --percentile 95 \
+  --tf-device auto
 ```
 
 #### PowerShell (Windows)
@@ -179,12 +203,13 @@ python -m src.pipeline.inference `
   --models-dir outputs/<run_id>/models_saved `
   --input data/input/amostra_ssp.csv `
   --output outputs/inferencia_<run_id> `
-  --percentile 95
+  --percentile 95 `
+  --tf-device auto
 ```
 
 #### CMD (Windows)
 ```cmd
-python -m src.pipeline.inference --models-dir outputs\<run_id>\models_saved --input data/input/amostra_ssp.csv --output outputs/inferencia_<run_id> --percentile 95
+python -m src.pipeline.inference --models-dir outputs\<run_id>\models_saved --input data/input/amostra_ssp.csv --output outputs/inferencia_<run_id> --percentile 95 --tf-device auto
 ```
 
 ## Guia de Hiperparâmetros
@@ -283,12 +308,14 @@ Comando real (`src/pipeline/inference.py`):
 python -m src.pipeline.inference \
   --models-dir outputs/<run_id>/models_saved \
   --input <novos_dados.csv> \
-  --output outputs/inferencia/
+  --output outputs/inferencia/ \
+  --tf-device auto
 ```
 
 Parâmetros úteis:
 - `--percentile` (default `95`)
 - `--config` (default `config_mapeamento.yaml`)
+- `--tf-device` (`auto`, `cpu`, `gpu`)
 - `--allow-legacy-manifest` (permite manifesto sem SHA256)
 
 Modos de operação:
@@ -384,6 +411,10 @@ Com `--seed 42`, o pipeline fixa:
 Limitação prática:
 - Em GPU, operações podem não ser bit-perfect entre execuções.
 
+Modos operacionais recomendados:
+- `cpu-audit`: usar `--tf-device cpu` para reprodução forense.
+- `gpu-train`: usar `--tf-device gpu` para treino exploratório/volumoso.
+
 ## Rastreabilidade
 A rastreabilidade da run é registrada em:
 - `outputs/runs_index.csv`
@@ -434,13 +465,18 @@ Build:
 docker build -t sspdf-anomalias .
 ```
 
+Build GPU (NVIDIA):
+```bash
+docker build -f Dockerfile.gpu -t sspdf-anomalias-gpu .
+```
+
 Execução (treino) com `docker run`:
 ```bash
 docker run --rm \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/outputs:/app/outputs \
   sspdf-anomalias \
-  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --output-dir /app/outputs/docker_train
+  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
 ```
 
 PowerShell equivalente:
@@ -449,19 +485,35 @@ docker run --rm `
   -v "${PWD}\data:/app/data" `
   -v "${PWD}\outputs:/app/outputs" `
   sspdf-anomalias `
-  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --output-dir /app/outputs/docker_train
+  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
 ```
 
 `docker compose` (treino e inferência):
 ```bash
-docker compose run --rm train --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --output-dir /app/outputs/docker_train
-docker compose run --rm infer
+docker compose run --rm train --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
+docker compose run --rm infer --tf-device auto
+```
+
+`docker compose` com GPU (NVIDIA Container Toolkit):
+```bash
+docker compose --profile gpu run --rm train-gpu
+docker compose --profile gpu run --rm infer-gpu
+```
+
+Pré-requisitos do host para GPU:
+- Driver NVIDIA instalado e `nvidia-smi` funcional no host.
+- Docker com NVIDIA Container Toolkit instalado.
+- Validação recomendada:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
+docker compose --profile gpu run --rm train-gpu python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
 ```
 
 Se quiser fixar variáveis do serviço `infer`, copie `.env.example` para `.env` e ajuste:
 - `RUN_ID`
 - `INPUT_FILE`
 - `INFER_OUTPUT_DIR`
+- `TF_DEVICE`
 
 ## Limitações Conhecidas
 - Em GPU, determinismo bit-a-bit não é garantido para todas as operações.

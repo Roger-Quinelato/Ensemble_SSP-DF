@@ -22,3 +22,55 @@ services:
       - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
       - --output
       - /app/outputs/${INFER_OUTPUT_DIR:-inference_output}
+
+  train-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: sspdf-anomalias-gpu
+    gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TF_DEVICE=${TF_DEVICE:-gpu}
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    command:
+      - python
+      - -m
+      - src.main
+      - --tf-device
+      - ${TF_DEVICE:-gpu}
+      - --input
+      - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
+      - --output-dir
+      - /app/outputs
+
+  infer-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: sspdf-anomalias-gpu
+    gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TF_DEVICE=${TF_DEVICE:-gpu}
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    command:
+      - python
+      - -m
+      - src.pipeline.inference
+      - --models-dir
+      - /app/outputs/${RUN_ID:-20260320_144331}/models_saved
+      - --input
+      - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
+      - --output
+      - /app/outputs/${INFER_OUTPUT_DIR:-inference_output}
+      - --tf-device
+      - ${TF_DEVICE:-gpu}
