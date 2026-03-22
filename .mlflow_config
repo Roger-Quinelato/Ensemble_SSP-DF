@@ -1,0 +1,7 @@
+# Configuracao MLflow - opcional
+# Para usar servidor remoto: MLFLOW_TRACKING_URI=http://servidor:5000
+# Para armazenar localmente (padrao): mlruns/ na raiz do projeto
+# Para desativar: SSPDF_DISABLE_TRACKING=true
+
+# Iniciar UI local: mlflow ui
+# Acessar em: http://localhost:5000

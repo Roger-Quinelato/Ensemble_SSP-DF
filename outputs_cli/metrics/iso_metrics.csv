@@ -1,7 +1,0 @@
-Model,Percentile,Threshold_Value,Anomalies_Detected,Pct_Dataset,Calibrated_On
-ISO_n100,90,0.616923,10,10.0,train
-ISO_n100,95,0.654594,6,6.0,train
-ISO_n100,99,0.655188,3,3.0,train
-ISO_n200,90,0.614691,10,10.0,train
-ISO_n200,95,0.654002,6,6.0,train
-ISO_n200,99,0.655485,3,3.0,train

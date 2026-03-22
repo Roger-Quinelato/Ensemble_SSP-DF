@@ -1,22 +1,52 @@
 # ==============================================================================
 # CONFIGURAÇÃO MESTRE - PIPELINE DE DETECÇÃO DE ANOMALIAS (SSP-DF)
-# BASEADO NA EVIDÊNCIA VISUAL (BD SSP-DF)
 # ==============================================================================
+# TODOS os hiperparâmetros do pipeline estão centralizados aqui.
+# Para experimentar, altere apenas este arquivo — não edite código Python.
 
 random_state: 42
-# 1. MAPEAMENTO DE DADOS
 
-# Nome na Base SSP-DF : Nome Interno Usado no Pipeline
+# 1. MAPEAMENTO DE COLUNAS
 mapeamento_colunas:
-  placa: "placa"    
-  timestamp: "timestamp" 
+  placa: "placa"
+  timestamp: "timestamp"
   latitude: "latitude"
   longitude: "longitude"
   RA: "regiao_adm"
-  
-# 2. CONFIGURAÇÃO DE ENGENHARIA DE FEATURES
+
+# 2. PIPELINE
 parametros:
+  # --- Split temporal ---
+  split_ratios:
+    train: 0.6
+    validation: 0.2
+    test: 0.2
+
+  # --- Thresholds de anomalia ---
   percentis_teste: [90, 95, 99]
-  lstm_window_size: 3
+
+  # --- Isolation Forest ---
+  isolation_forest:
+    n_estimators: [100, 200]       # Lista: treina uma variante por valor
+    contamination: "auto"          # "auto" ou float (ex: 0.05)
+
+  # --- HBOS ---
+  hbos:
+    n_bins: [10, 20]               # Lista: treina uma variante por valor
+    contamination: 0.1             # float entre 0 e 0.5
+
+  # --- Modelo Temporal (GRU Autoencoder) ---
+  temporal:
+    arch_type: "gru"               # "gru" ou "lstm"
+    window_size: 3                 # Janelas temporais (timesteps)
+    epochs: 5                      # Épocas de treinamento
+    batch_size: 64                 # Batch size do treino
+    encoder_units: [32, 16]        # Unidades por camada do encoder
+    decoder_units: [16, 32]        # Unidades por camada do decoder
+    dropout: 0.2                   # Dropout entre camadas
+    optimizer: "adam"              # Otimizador do Keras
+    loss: "mse"                    # Função de perda
+
+# 3. CONFIGURAÇÕES GERAIS
 configuracoes_gerais:
-  gap_segmentation_seconds: 1800  # 30 minutos - Diminuir para uma análise mais sensível a paradas curtas
+  gap_segmentation_seconds: 1800   # Máximo gap entre leituras (segundos)

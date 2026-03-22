@@ -3,11 +3,14 @@ Modulo unificado de Autoencoder Temporal para deteccao de anomalias sequenciais.
 Suporta GRU (default, mais eficiente) e LSTM (para compatibilidade).
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 from tensorflow import keras
 from src.utils.logger_utils import log_execution
-from src.utils.logger_utils import logger
+
+logger = logging.getLogger("sspdf")
 
 
 class TemporalAutoencoder:
@@ -30,6 +33,7 @@ class TemporalAutoencoder:
         window_size=5,
         max_gap_seconds=600,
         arch_type="gru",
+        arch_config=None,
     ):
         """
         Args:
@@ -53,9 +57,21 @@ class TemporalAutoencoder:
         self.window_size = window_size
         self.max_gap_seconds = max_gap_seconds
         self.arch_type = arch_type
+        # Configuração da arquitetura (com defaults)
+        default_config = {
+            "encoder_units": [2**5, 2**4],
+            "decoder_units": [2**4, 2**5],
+            "dropout": 0.2,
+            "optimizer": "adam",
+            "loss": "mse",
+        }
+        if arch_config is not None:
+            default_config.update(arch_config)
+        self.arch_config = default_config
         self.model = None
         self._cached_sequences = None
-        self._cached_indices = None
+        self._cached_last_indices = None
+        self._cached_first_indices = None
 
         self._LayerClass = keras.layers.GRU if arch_type == "gru" else keras.layers.LSTM
         layer_name = arch_type.upper()
@@ -74,10 +90,14 @@ class TemporalAutoencoder:
         """
         Gera sequencias temporais respeitando veiculo e continuidade temporal.
         Returns:
-            tuple: (np.ndarray[N, window, features], np.ndarray[N] de indices)
+            tuple:
+                - np.ndarray[N, window, features] de sequencias
+                - np.ndarray[N] com indices do ultimo elemento da sequencia
+                - np.ndarray[N] com indices do primeiro elemento da sequencia
         """
         x_seq_list = []
-        valid_indices_list = []
+        last_indices_list = []
+        first_indices_list = []
         unique_vehicles = np.unique(self.vehicle_ids)
         max_gap_ns = np.timedelta64(self.max_gap_seconds, "s")
 
@@ -95,18 +115,26 @@ class TemporalAutoencoder:
                     continue
                 seq = vehicle_data[i: i + self.window_size]
                 x_seq_list.append(seq)
-                original_idx = vehicle_indices[i + self.window_size - 1]
-                valid_indices_list.append(original_idx)
+                first_indices_list.append(vehicle_indices[i])
+                last_indices_list.append(vehicle_indices[i + self.window_size - 1])
 
         if len(x_seq_list) == 0:
-            return np.array([]), np.array([])
-        return np.array(x_seq_list), np.array(valid_indices_list)
+            return np.array([]), np.array([]), np.array([])
+        return (
+            np.array(x_seq_list),
+            np.array(last_indices_list),
+            np.array(first_indices_list),
+        )
 
     def _get_or_create_sequences(self):
         """Retorna sequencias cacheadas. Gera apenas na primeira chamada."""
         if self._cached_sequences is None:
             logger.info("   -> [CACHE] Gerando sequencias pela primeira vez...")
-            self._cached_sequences, self._cached_indices = self.create_sequences_with_index()
+            (
+                self._cached_sequences,
+                self._cached_last_indices,
+                self._cached_first_indices,
+            ) = self.create_sequences_with_index()
             if len(self._cached_sequences) > 0:
                 logger.info(
                     f"   -> [CACHE] {len(self._cached_sequences):,} sequencias cacheadas"
@@ -115,44 +143,82 @@ class TemporalAutoencoder:
             logger.info(
                 f"   -> [CACHE] Reutilizando {len(self._cached_sequences):,} sequencias"
             )
-        return self._cached_sequences, self._cached_indices
+        return (
+            self._cached_sequences,
+            self._cached_last_indices,
+            self._cached_first_indices,
+        )
+
+    def get_sequence_index_bounds(self):
+        """
+        Retorna arrays de indices (primeiro, ultimo) para cada sequencia cacheada.
+        """
+        _, last_indices, first_indices = self._get_or_create_sequences()
+        return first_indices, last_indices
 
     def _build_model(self, n_features):
-        """
-        Constrói o autoencoder com a arquitetura selecionada (GRU ou LSTM).
-        """
+        """Constrói o autoencoder com a arquitetura configurável."""
         layer = self._LayerClass
         arch = self.arch_type.upper()
+        cfg = self.arch_config
 
-        model = keras.Sequential([
-            layer(
-                32,
-                activation="tanh",
-                input_shape=(self.window_size, n_features),
-                return_sequences=True,
-                name=f"encoder_{arch}1",
-            ),
-            keras.layers.Dropout(0.2, name="encoder_dropout"),
-            layer(
-                16,
-                activation="tanh",
-                return_sequences=False,
-                name=f"encoder_{arch}2_bottleneck",
-            ),
-            keras.layers.RepeatVector(self.window_size, name="repeat"),
-            layer(16, activation="tanh", return_sequences=True, name=f"decoder_{arch}1"),
-            keras.layers.Dropout(0.2, name="decoder_dropout"),
-            layer(32, activation="tanh", return_sequences=True, name=f"decoder_{arch}2"),
+        enc_units = cfg["encoder_units"]
+        dec_units = cfg["decoder_units"]
+        dropout = cfg["dropout"]
+
+        layers = []
+
+        # Encoder
+        for i, units in enumerate(enc_units):
+            is_last = i == len(enc_units) - 1
+            layer_kwargs = {
+                "activation": "tanh",
+                "return_sequences": not is_last,
+                "name": f"encoder_{arch}{i+1}" + ("_bottleneck" if is_last else ""),
+            }
+            if i == 0:
+                layer_kwargs["input_shape"] = (self.window_size, n_features)
+            layers.append(layer(units, **layer_kwargs))
+            if i < len(enc_units) - 1:
+                layers.append(keras.layers.Dropout(dropout, name=f"encoder_dropout_{i+1}"))
+
+        # Bridge
+        layers.append(keras.layers.RepeatVector(self.window_size, name="repeat"))
+
+        # Decoder
+        for i, units in enumerate(dec_units):
+            layers.append(
+                layer(
+                    units,
+                    activation="tanh",
+                    return_sequences=True,
+                    name=f"decoder_{arch}{i+1}",
+                )
+            )
+            if i < len(dec_units) - 1:
+                layers.append(keras.layers.Dropout(dropout, name=f"decoder_dropout_{i+1}"))
+
+        # Output
+        layers.append(
             keras.layers.TimeDistributed(
                 keras.layers.Dense(n_features, activation=None),
                 name="output",
-            ),
-        ])
-        model.compile(optimizer="adam", loss="mse")
+            )
+        )
+
+        model = keras.Sequential(layers)
+        model.compile(optimizer=cfg["optimizer"], loss=cfg["loss"])
         return model
 
     @log_execution
-    def train_evaluate(self, strategy_name, mask_train=None, epochs=10, batch_size=64):
+    def train_evaluate(
+        self,
+        strategy_name,
+        mask_train=None,
+        sequence_mask=None,
+        epochs=10,
+        batch_size=64,
+    ):
         """
         Treina e avalia o autoencoder temporal.
 
@@ -164,14 +230,25 @@ class TemporalAutoencoder:
         Returns:
             tuple: (MSE scores, indices, modelo) ou (None, None, None)
         """
-        x_seq_all, indices_all = self._get_or_create_sequences()
+        x_seq_all, last_indices_all, _ = self._get_or_create_sequences()
         if len(x_seq_all) == 0:
             logger.warning(f"Nenhuma sequencia valida para {strategy_name}")
             return None, None, None
 
-        if mask_train is not None:
+        if sequence_mask is not None:
+            train_mask = np.asarray(sequence_mask).astype(bool)
+            if len(train_mask) != len(x_seq_all):
+                raise ValueError(
+                    "sequence_mask deve ter o mesmo tamanho de x_seq_all "
+                    f"({len(x_seq_all)}), recebeu {len(train_mask)}."
+                )
+            x_train = x_seq_all[train_mask]
+            if len(x_train) == 0:
+                logger.warning("Treino vazio apos filtro de mascara de sequencia.")
+                return None, None, None
+        elif mask_train is not None:
             mask_series = pd.Series(mask_train, index=self.original_indices)
-            train_mask = mask_series.loc[indices_all].values.astype(bool)
+            train_mask = mask_series.reindex(last_indices_all).fillna(False).values.astype(bool)
             x_train = x_seq_all[train_mask]
             if len(x_train) == 0:
                 logger.warning("Treino vazio apos filtro de mascara.")
@@ -200,9 +277,4 @@ class TemporalAutoencoder:
         x_pred = self.model.predict(x_seq_all, verbose=0)
         mse_sequences = np.mean(np.power(x_seq_all - x_pred, 2), axis=(1, 2))
 
-        return mse_sequences, indices_all, self.model
-
-
-# Aliases para compatibilidade retroativa
-LSTMPipeline = TemporalAutoencoder
-GRUPipeline = TemporalAutoencoder
+        return mse_sequences, last_indices_all, self.model

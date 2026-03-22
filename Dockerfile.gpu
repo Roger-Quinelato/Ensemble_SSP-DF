@@ -1,29 +1,27 @@
-FROM python:3.10-slim
+FROM tensorflow/tensorflow:2.12.0-gpu
 
 WORKDIR /app
 
-# Variaveis de ambiente
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TF_CPP_MIN_LOG_LEVEL=2
 
-# Cache de dependencias: copiar requirements primeiro
-COPY requirements.txt .
+# Dependencias do perfil GPU (TensorFlow 2.12.x + stack do projeto)
+COPY requirements-gpu.txt .
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install -r requirements-gpu.txt
 
 # Usuario nao-root para execucao
 RUN useradd -m -u 1000 sspdf
 
-# Copiar codigo-fonte
+# Codigo-fonte
 COPY config_mapeamento.yaml .
 COPY src/ src/
 COPY config/ config/
 
-# Criar diretorios de saida
 RUN mkdir -p data/input
 
-# Ponto de entrada correto
 USER sspdf
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 CMD python -c "import src.main" || exit 1
-CMD ["python", "-m", "src.main"]
+CMD ["python", "-m", "src.main", "--tf-device", "auto"]

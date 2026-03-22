@@ -1,0 +1,40 @@
+random_state: 42
+mapeamento_colunas:
+  placa: placa
+  timestamp: timestamp
+  latitude: latitude
+  longitude: longitude
+  RA: regiao_adm
+parametros:
+  split_ratios:
+    train: 0.6
+    validation: 0.2
+    test: 0.2
+  percentis_teste:
+  - 90
+  - 95
+  - 99
+  isolation_forest:
+    n_estimators:
+    - 100
+    contamination: auto
+  hbos:
+    n_bins:
+    - 10
+    contamination: 0.1
+  temporal:
+    arch_type: gru
+    window_size: 50
+    epochs: 20
+    batch_size: 64
+    encoder_units:
+    - 32
+    - 16
+    decoder_units:
+    - 16
+    - 32
+    dropout: 0.2
+    optimizer: adam
+    loss: mse
+configuracoes_gerais:
+  gap_segmentation_seconds: 1800
