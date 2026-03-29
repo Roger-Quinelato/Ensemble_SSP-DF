@@ -61,3 +61,24 @@ def test_feature_engineering(tmp_path):
     assert 'hora_sin' in df_feat.columns
     assert 'velocidade_kmh' in df_feat.columns
     assert 'hora_sin' in features
+
+
+def test_load_and_standardize_rejects_unsupported_extension(tmp_path):
+    with open('config_mapeamento.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    proc = DataProcessor(config)
+
+    bad_input = tmp_path / "entrada.txt"
+    bad_input.write_text("conteudo invalido", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Formato de input nao suportado"):
+        proc.load_and_standardize(str(bad_input))
+
+
+def test_load_and_standardize_rejects_parent_ref_path():
+    with open('config_mapeamento.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    proc = DataProcessor(config)
+
+    with pytest.raises(ValueError, match="path traversal relativo"):
+        proc.load_and_standardize("..\\fora\\dados.csv")

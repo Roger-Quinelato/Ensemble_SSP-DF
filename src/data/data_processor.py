@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 import joblib as _joblib
 from src.data.schema import validate_input
 from src.utils.logger_utils import log_execution
+from src.utils.path_security import normalize_cli_path
 
 logger = logging.getLogger("sspdf")
 
@@ -41,6 +42,19 @@ class DataProcessor:
         """
         Carrega e padroniza o DataFrame de entrada.
         """
+        filepath = normalize_cli_path(
+            filepath,
+            "--input",
+            must_exist=True,
+            expect_dir=False,
+            block_relative_parent=True,
+        )
+        lower = filepath.lower()
+        if not (lower.endswith(".csv") or lower.endswith(".parquet")):
+            raise ValueError(
+                "Formato de input nao suportado. Use arquivo .csv ou .parquet."
+            )
+
         if filepath.endswith(".parquet"):
             df = pd.read_parquet(filepath)
         else:

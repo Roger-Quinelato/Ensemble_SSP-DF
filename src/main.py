@@ -18,7 +18,8 @@ if __package__ is None or __package__ == "":
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger("sspdf")
-from src.utils.logger_utils import setup_logger
+from src.utils.logger_utils import resolve_os_user, setup_logger
+from src.utils.path_security import normalize_cli_path
 from src.utils.tf_runtime import setup_deterministic_runtime
 
 
@@ -80,8 +81,35 @@ def parse_args():
     return parser.parse_args()
 
 
+def _normalize_and_validate_cli_args(args):
+    """
+    Hardening de paths recebidos pela CLI de treino.
+    """
+    args.config = normalize_cli_path(
+        args.config,
+        "--config",
+        must_exist=True,
+        expect_dir=False,
+    )
+    if args.input is not None:
+        args.input = normalize_cli_path(
+            args.input,
+            "--input",
+            must_exist=True,
+            expect_dir=False,
+        )
+    args.output_dir = normalize_cli_path(
+        args.output_dir,
+        "--output-dir",
+        must_exist=False,
+        expect_dir=True,
+        block_relative_parent=True,
+    )
+    return args
+
+
 def main():
-    args = parse_args()
+    args = _normalize_and_validate_cli_args(parse_args())
     setup_logger(name="sspdf")
     if args.verbose:
         logging.getLogger("sspdf").setLevel(logging.DEBUG)
@@ -104,6 +132,7 @@ def main():
         f"TensorFlow runtime ativo: {tf_runtime['active']} "
         f"(GPUs detectadas: {tf_runtime['gpu_count']})"
     )
+    logger.info(f"Executor SO: {resolve_os_user()}")
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Output dir: {output_dir_with_run}")
     if args.input:

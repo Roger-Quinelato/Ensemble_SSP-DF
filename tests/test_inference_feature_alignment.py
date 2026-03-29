@@ -1,4 +1,5 @@
 import json
+import os
 
 import joblib
 import numpy as np
@@ -13,10 +14,12 @@ from src.pipeline.inference import (
     _ensure_expected_features_present,
     _load_feature_schema,
     _load_models_from_manifest,
+    _normalize_and_validate_inference_paths,
     _resolve_expected_main_features,
     _resolve_feature_list,
     load_thresholds,
 )
+from src.utils.path_security import normalize_cli_path
 
 
 def test_align_df_with_expected_ra_adds_missing_and_drops_unseen():
@@ -285,3 +288,42 @@ def test_load_models_manifest_legacy_scaler_warns_in_permissive_mode(tmp_path, c
 
     assert loaded_scaler is not None
     assert "Modo permissivo: carregando scaler.joblib via caminho legado sem sha256." in caplog.text
+
+
+def test_normalize_cli_path_blocks_relative_parent_traversal():
+    with pytest.raises(ValueError, match="path traversal relativo"):
+        normalize_cli_path(
+            "..\\segredo\\dados.csv",
+            "--input",
+            block_relative_parent=True,
+        )
+
+
+def test_normalize_cli_path_returns_absolute_normalized_path(tmp_path):
+    fpath = tmp_path / "arquivo.csv"
+    fpath.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    resolved = normalize_cli_path(
+        str(fpath),
+        "--input",
+        must_exist=True,
+        expect_dir=False,
+    )
+
+    assert os.path.isabs(resolved)
+    assert resolved.endswith("arquivo.csv")
+
+
+def test_inference_path_validation_rejects_models_dir_parent_ref(tmp_path):
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("random_state: 42\nmapeamento_colunas: {}\n", encoding="utf-8")
+    inp = tmp_path / "in.csv"
+    inp.write_text("placa,timestamp,latitude,longitude\nA,2024-01-01,-15.8,-47.9\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="--models-dir"):
+        _normalize_and_validate_inference_paths(
+            input_path=str(inp),
+            models_dir="..\\models_saved",
+            config_path=str(cfg),
+            output_dir=str(tmp_path / "out"),
+        )

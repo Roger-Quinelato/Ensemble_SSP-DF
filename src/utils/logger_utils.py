@@ -1,4 +1,5 @@
 import functools
+import getpass
 import logging
 import os
 import time
@@ -87,6 +88,28 @@ def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
 # Logger global para compatibilidade retroativa.
 # Nao configurar handlers no import; o setup deve ser explicito.
 logger = logging.getLogger("sspdf")
+
+
+def resolve_os_user():
+    """
+    Resolve usuario do sistema operacional para trilha de auditoria.
+    """
+    candidates = []
+    try:
+        candidates.append(getpass.getuser())
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            os.environ.get("USERNAME"),
+            os.environ.get("USER"),
+            os.environ.get("LOGNAME"),
+        ]
+    )
+    for value in candidates:
+        if value:
+            return str(value)
+    return "unknown"
 
 
 def log_execution(func):

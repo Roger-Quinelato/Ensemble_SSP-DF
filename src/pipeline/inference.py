@@ -31,9 +31,49 @@ from src.utils.ensemble_decision import (
 from src.utils.evaluation import ThresholdOptimizer
 from src.utils.artifact_utils import verify_artifact_strict
 from src.utils.tf_runtime import configure_tensorflow_runtime
+from src.utils.logger_utils import resolve_os_user
+from src.utils.path_security import normalize_cli_path
 
 logger = logging.getLogger("sspdf")
 FEATURE_SCHEMA_FILENAME = "feature_schema.json"
+
+
+def _normalize_and_validate_inference_paths(
+    input_path,
+    models_dir,
+    config_path,
+    output_dir,
+):
+    """
+    Hardening de paths da CLI de inferencia.
+    """
+    models_dir = normalize_cli_path(
+        models_dir,
+        "--models-dir",
+        must_exist=True,
+        expect_dir=True,
+        block_relative_parent=True,
+    )
+    config_path = normalize_cli_path(
+        config_path,
+        "--config",
+        must_exist=True,
+        expect_dir=False,
+    )
+    input_path = normalize_cli_path(
+        input_path,
+        "--input",
+        must_exist=True,
+        expect_dir=False,
+    )
+    output_dir = normalize_cli_path(
+        output_dir,
+        "--output-dir",
+        must_exist=False,
+        expect_dir=True,
+        block_relative_parent=True,
+    )
+    return input_path, models_dir, config_path, output_dir
 
 
 def _canonical_temporal_name_from_file(fname):
@@ -566,12 +606,42 @@ def predict(
 
         setup_logger(name="sspdf")
 
+    input_path, models_dir, config_path, output_dir = _normalize_and_validate_inference_paths(
+        input_path=input_path,
+        models_dir=models_dir,
+        config_path=config_path,
+        output_dir=output_dir,
+    )
+
+    logger.warning(
+        "[TRUST-BOUNDARY] --models-dir e tratado como origem ESTRITAMENTE CONFIAVEL. "
+        "Nao aponte para diretorios de terceiros ou nao auditados."
+    )
+    if os.path.basename(os.path.normpath(models_dir)) != "models_saved":
+        logger.warning(
+            "[TRUST-BOUNDARY] --models-dir nao termina com 'models_saved'. "
+            "Fluxo institucional recomendado: outputs/<run_id>/models_saved."
+        )
+
+    if not strict_integrity:
+        logger.warning(
+            "[SEGURANCA] --allow-legacy-manifest ativo: validacao SHA256 DESATIVADA. "
+            "Certifique-se de que os artefatos em --models-dir sao de origem estritamente controlada. "
+            "Use somente para runs antigas sem manifesto ou em ambiente isolado."
+        )
+        logger.warning(
+            "[SEGURANCA] Artefatos de modelos (joblib/.h5) podem executar desserializacao de alto risco "
+            "quando provenientes de origem nao confiavel. "
+            "Em producao institucional, mantenha strict_integrity=True e nao use --allow-legacy-manifest."
+        )
+
     os.makedirs(output_dir, exist_ok=True)
     metrics_dir = os.path.join(output_dir, "metrics")
     os.makedirs(metrics_dir, exist_ok=True)
 
     logger.info("=" * 80)
     logger.info("MODO DE INFERENCIA - SSP-DF Pipeline")
+    logger.info(f"   Executor SO: {resolve_os_user()}")
     logger.info(f"   Input:      {input_path}")
     logger.info(f"   Models dir: {models_dir}")
     logger.info(f"   Output:     {output_dir}")
@@ -869,7 +939,12 @@ def predict(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SSP-DF - Modo de Inferencia")
     parser.add_argument(
-        "--models-dir", required=True, help="Diretorio com modelos treinados"
+        "--models-dir",
+        required=True,
+        help=(
+            "Diretorio com modelos treinados (trust boundary): trate como origem "
+            "estritamente confiavel, preferencialmente outputs/<run_id>/models_saved."
+        ),
     )
     parser.add_argument("--input", required=True, help="Dados novos (.csv ou .parquet)")
     parser.add_argument("--config", default="config_mapeamento.yaml")
@@ -896,7 +971,8 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "Permite manifesto sem hashes SHA256 (compatibilidade com runs antigas). "
-            "Quando nao informado, a inferencia exige e valida hashes quando disponiveis."
+            "Quando nao informado, a inferencia exige e valida hashes quando disponiveis. "
+            "NAO recomendado para ambiente institucional de producao."
         ),
     )
     args = parser.parse_args()

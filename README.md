@@ -128,23 +128,23 @@ Dois scalers são usados por design:
 
 ## Requisitos de Software e Hardware
 ### Hardware mínimo (CPU)
-| Item | Requisito | Status |
+| Item | Requisito | Fonte |
 |---|---|---|
-| CPU | 4 vCPU | Comprovado (README) |
-| RAM | 8 GB | Comprovado (README) |
-| GPU | Não obrigatória | Comprovado (README) |
-| VRAM | Não aplicável no perfil CPU | Comprovado (README) |
-| Disco livre | [ESTIMAR] | [ESTIMAR] |
+| CPU | [ESTIMAR] 4 vCPU | Não há benchmark formal versionado no repositório |
+| RAM | [ESTIMAR] 8 GB | Não há benchmark formal versionado no repositório |
+| GPU | Não obrigatória | `--tf-device cpu` (default funcional) |
+| VRAM | Não aplicável no perfil CPU | — |
+| Disco livre | [ESTIMAR] ~2 GB (ambiente + artefatos de uma run) | Estimativa operacional, sem medição formal no repositório |
 
 ### Hardware recomendado (GPU)
-| Item | Requisito | Status |
+| Item | Requisito | Fonte |
 |---|---|---|
-| CPU | 8+ vCPU | Comprovado (README) |
-| RAM | 16-32 GB (conforme volume de dados) | Comprovado (README) |
-| GPU | NVIDIA compatível com TensorFlow 2.12.x | Comprovado (README + `requirements-gpu.txt` + `Dockerfile.gpu`) |
-| VRAM mínima | [ESTIMAR] | [ESTIMAR] |
-| Disco livre | [ESTIMAR] | [ESTIMAR] |
-| CUDA/cuDNN | [ESTIMAR] (a imagem `tensorflow/tensorflow:2.12.0-gpu` já embute stack compatível, mas versões exatas não são declaradas no repositório) | [ESTIMAR] |
+| CPU | [ESTIMAR] 8+ vCPU | Recomendação operacional (sem benchmark formal versionado) |
+| RAM | [ESTIMAR] 16-32 GB (conforme volume de dados) | Recomendação operacional (sem benchmark formal versionado) |
+| GPU | NVIDIA compatível com TensorFlow 2.12.x | `requirements-gpu.txt`, `Dockerfile.gpu` |
+| VRAM mínima | [ESTIMAR] 4 GB (para `batch_size=64`, `window_size=3`) | Não testado formalmente neste repositório |
+| Disco livre | [ESTIMAR] ~5 GB (ambiente + imagem Docker + outputs) | Estimativa operacional; tamanho depende do host e da run |
+| CUDA/cuDNN | [ESTIMAR] CUDA 11.8 / cuDNN 8.6 (base `tensorflow:2.12.0-gpu`) | Não há pin explícito de CUDA/cuDNN no repositório; derivado da imagem base |
 
 ### Software
 | Componente | Versão / Faixa comprovada | Fonte |
@@ -152,25 +152,65 @@ Dois scalers são usados por design:
 | Python | `3.10` / `3.10.x` | `environment.yml`, `environment.gpu.yml`, `Dockerfile` (`python:3.10-slim`) |
 | TensorFlow (CPU) | `tensorflow-cpu==2.12.0` | `requirements.txt`, `environment.yml` |
 | TensorFlow (GPU) | `tensorflow==2.12.0` | `requirements-gpu.txt`, `environment.gpu.yml`, `Dockerfile.gpu` |
-| Keras | `2.12.0` | `requirements*.txt`, `environment*.yml` |
+| Keras | `2.12.0` | `requirements*.txt`, `environment.gpu.yml` (pip) |
 | NumPy | `1.23.5` | `requirements*.txt`, `environment*.yml` |
 | scikit-learn | `>=1.3.0` | `requirements*.txt`, `environment*.yml` |
-| pyod | `>=1.1.0` | `requirements*.txt`, `environment*.yml` |
+| pyod | `>=1.1.0` | `requirements*.txt`, `environment*.yml` (pip) |
 | pandas | `>=1.5.0` | `requirements*.txt`, `environment*.yml` |
-| pandera | `>=0.18.0,<0.19.0` | `requirements*.txt`, `environment*.yml` |
-| plotly | `>=5.18.0` | `requirements*.txt`, `environment*.yml` |
-| mlflow | `>=2.10.0` | `requirements*.txt`, `environment*.yml` |
-| Docker Engine mínimo | [ESTIMAR] | [ESTIMAR] |
-| Docker Compose mínimo | [ESTIMAR] | [ESTIMAR] |
+| pandera | `>=0.18.0,<0.19.0` | `requirements*.txt`, `environment*.yml` (pip) |
+| plotly | `>=5.18.0` | `requirements*.txt`, `environment*.yml` (pip) |
+| mlflow | `>=2.10.0` | `requirements*.txt`, `environment*.yml` (pip) |
+| pyyaml | `>=6.0` | `requirements*.txt`, `environment*.yml` |
+| joblib | `>=1.3.0` | `requirements*.txt`, `environment*.yml` |
+| holidays | (sem pin) | `requirements*.txt`, `environment*.yml` — usado em `data_processor.py` para feriados BR/DF |
+| pyarrow | `>=12.0.0` | `requirements*.txt`, `environment*.yml` |
+| tqdm | `>=4.65.0` | `requirements*.txt`, `environment*.yml` |
+| Docker Engine | [ESTIMAR] `>=20.10` (com suporte a Compose V2) | Não há versão mínima pinada em arquivo de dependência |
+| Docker Compose | [ESTIMAR] `>=2.0` (plugin integrado ao Docker CLI) | Não há versão mínima pinada em arquivo de dependência |
 
-Sistemas operacionais suportados (pelo que o repositório realmente indica):
-- Linux: suportado (comandos Bash + fluxo Docker documentados).
-- Windows: suportado (comandos PowerShell/CMD documentados).
-- macOS: [ESTIMAR] (há comandos Bash compatíveis, mas sem validação formal registrada no repositório).
+Sistemas operacionais suportados:
+- **Linux**: suportado (comandos Bash + fluxo Docker documentados).
+- **Windows**: suportado (comandos PowerShell/CMD documentados, testado no desenvolvimento).
+- **macOS**: [ESTIMAR] compatível em princípio (mesmos comandos Bash do Linux), sem validação formal neste projeto.
 
 Observações operacionais:
-- Para GPU em contêiner, o host deve ter driver NVIDIA e NVIDIA Container Toolkit (documentado no README).
-- Em GPU, determinismo bit-a-bit pode variar por stack do ambiente.
+- Para GPU em contêiner, o host deve ter driver NVIDIA e NVIDIA Container Toolkit.
+- Em GPU, determinismo bit-a-bit pode variar por stack CUDA/cuDNN do ambiente.
+
+### Governança de Dependências (Release Institucional)
+Política adotada:
+- `requirements.txt` e `environment.yml` usam faixas controladas (com teto de versão) para reduzir drift sem forçar upgrade grande de runtime.
+- `tensorflow-cpu` e `keras` permanecem fixos em `2.12.0` nesta fase.
+
+Processo de congelamento para release:
+1. Criar ambiente limpo com os arquivos versionados (`requirements.txt` ou `environment.yml`).
+2. Gerar lockfile institucional do release:
+   - pip: `pip freeze > requirements.release.lock.txt`
+   - conda: `conda env export --no-builds > environment.release.lock.yml`
+3. Validar CI e treino/inferência com os lockfiles gerados.
+4. Versionar os lockfiles junto com a tag de release institucional.
+
+Regra de segurança no CI:
+- O workflow usa `pip-audit` como gate.
+- A supressão `GHSA-34jh-p97f-mpxf` é temporária, documentada inline no `ci.yml` e deve ser revisada na próxima janela de upgrade de runtime.
+
+### Estado de Segurança TensorFlow/Keras (Linha 2.12.x)
+Diagnóstico atual:
+- a stack operacional permanece em `tensorflow-cpu==2.12.0` e `keras==2.12.0` por compatibilidade com o pipeline atual;
+- auditoria de segurança identifica CVEs em `keras==2.12.0` com correções disponíveis apenas na linha `keras>=3.11/3.12`;
+- portanto, **não existe patch pequeno/incremental** dentro da linha `2.12.x` para eliminar esse risco sem migração de major.
+
+Mitigação operacional imediata (nesta fase):
+- tratar `--models-dir` como trust boundary estrita (somente artefatos internos auditados);
+- manter `strict_integrity=True` na inferência e evitar `--allow-legacy-manifest` em produção;
+- preservar validação de integridade por `models_manifest.json` + SHA256 antes de carregar `joblib`/`.h5`;
+- manter segregação de ambiente (treino/inferência) e controle de acesso no SO/infra.
+
+Plano recomendado de upgrade (faseado):
+1. congelar release atual (lockfiles institucionais) e manter operação com mitigação acima;
+2. abrir branch de migração para linha TensorFlow/Keras mais nova (com validação de compatibilidade de serialização `.h5`);
+3. executar suíte crítica: `test_models_deep`, `test_inference_feature_alignment`, `test_integration_train_infer`, `test_stability`;
+4. somente promover para produção após validação funcional + segurança sem regressão.
 
 ## Instalação
 ### 1) Clonar o repositório
@@ -273,7 +313,7 @@ python -m src.main --input data/input/amostra_ssp.csv --epochs 1 --seed 42 --tf-
 
 3. Validar artefatos da run recém-criada:
 - `outputs/<run_id>/models_saved/models_manifest.json`
-- `outputs/<run_id>/models_saved/thresholds_p95.json` (ou outro percentil operacional configurado)
+- `outputs/<run_id>/models_saved/thresholds_p<percentil_operacional>.json`
 - `outputs/<run_id>/master_table/resultado_final.parquet`
 - `outputs/<run_id>/metrics/run_summary.json`
 
@@ -306,6 +346,11 @@ Parâmetros CLI (`src/main.py`):
 | `--seed` | `42` | Seed global de reprodutibilidade. |
 | `--tf-device` | `auto` | Runtime TensorFlow: `auto`, `cpu` (força CPU) ou `gpu` (exige GPU). |
 | `--verbose` | `False` | Ativa logs em nível debug. |
+
+Hardening de paths na CLI de treino:
+- paths são normalizados para forma absoluta antes do uso;
+- `--output-dir` bloqueia path traversal relativo com `..`;
+- `--config` e `--input` exigem arquivo existente.
 
 ## Runtime TensorFlow (CPU/GPU)
 O pipeline aceita seleção explícita de dispositivo com `--tf-device`:
@@ -388,7 +433,7 @@ python -m src.pipeline.inference \
   --models-dir outputs/<run_id>/models_saved \
   --input data/input/amostra_ssp.csv \
   --output outputs/inferencia_<run_id> \
-  --percentile 95 \
+  --percentile <percentil_operacional_da_run> \
   --tf-device auto
 ```
 
@@ -398,14 +443,16 @@ python -m src.pipeline.inference `
   --models-dir outputs/<run_id>/models_saved `
   --input data/input/amostra_ssp.csv `
   --output outputs/inferencia_<run_id> `
-  --percentile 95 `
+  --percentile <percentil_operacional_da_run> `
   --tf-device auto
 ```
 
 #### CMD (Windows)
 ```cmd
-python -m src.pipeline.inference --models-dir outputs\<run_id>\models_saved --input data/input/amostra_ssp.csv --output outputs/inferencia_<run_id> --percentile 95 --tf-device auto
+python -m src.pipeline.inference --models-dir outputs\<run_id>\models_saved --input data/input/amostra_ssp.csv --output outputs/inferencia_<run_id> --percentile <percentil_operacional_da_run> --tf-device auto
 ```
+
+Observação operacional: se a run foi treinada com `operational_percentile != 95`, passe o mesmo percentil em `--percentile` para manter coerência de thresholds e labels.
 
 ## Guia de Hiperparâmetros
 O pipeline foi desenhado para que a maior parte dos ajustes operacionais seja feita em YAML, e não diretamente no código.
@@ -438,7 +485,8 @@ Valores atuais em `config_mapeamento.yaml`:
 - `parametros.temporal.batch_size`: `64`
 - `parametros.temporal.dropout`: `0.2`
 - `configuracoes_gerais.gap_segmentation_seconds`: `1800`
-- `configuracoes_gerais.report_required`: `true` (se ausente, default é `true`)
+
+`report_required`: não está definido no YAML padrão (`config_mapeamento.yaml`). O pipeline usa default Python `True` (em `experiment_runner.py`). Para desativar o relatório HTML, adicione `configuracoes_gerais.report_required: false` ao YAML.
 
 Percentil operacional da decisão final:
 - o pipeline normaliza `parametros.percentis_teste` e prioriza `p95` quando `95` está na lista;
@@ -508,6 +556,14 @@ Parâmetros úteis:
 - `--tf-device` (`auto`, `cpu`, `gpu`)
 - `--allow-legacy-manifest`
 
+Regra de coerência: em produção, passe em `--percentile` o mesmo `operational_percentile` da run de treino que gerou o `models_saved/`.
+
+Hardening de paths e trust boundary na inferência:
+- `--models-dir`, `--config`, `--input` e `--output-dir` são normalizados e validados;
+- `--models-dir` é tratado como **origem estritamente confiável** (trust boundary);
+- fluxo institucional recomendado: `outputs/<run_id>/models_saved`;
+- em paths relativos críticos (`--models-dir` e `--output-dir`), uso de `..` é bloqueado.
+
 Modos de operação:
 - normal: usa thresholds do treino;
 - degradado: thresholds ausentes, recalibra no lote novo (warning);
@@ -576,6 +632,15 @@ A rastreabilidade da run é registrada em:
 - `outputs/runs_index.csv`
 - `outputs/<run_id>/metrics/run_summary.json`
 - `outputs/<run_id>/models_saved/models_manifest.json`
+- `outputs/<run_id>/metrics/execution.log` (inclui usuário do SO executor)
+
+### Autenticação e Controle de Acesso
+O projeto **não implementa autenticação própria** (login, RBAC, gestão de identidade ou segredo aplicacional).
+
+Modelo operacional adotado:
+- controle de acesso delegado ao sistema operacional/infraestrutura (usuário local, permissões de arquivo, IAM, controles de container/orquestrador);
+- segregação de ambientes e credenciais fora do código da aplicação;
+- trilha de auditoria orientada por `run_id`, metadados git, hashes SHA256 e identificação do usuário do SO executor.
 
 ### Semântica de status e run_summary.json
 O arquivo `run_summary.json` (em `outputs/<run_id>/metrics/`) é a fonte oficial do estado final da run.
@@ -587,12 +652,19 @@ Campos principais:
 - `report_status`
 - `report_error`
 - `parameters.operational_percentile`
+- `config_name` (nome do YAML sem path absoluto)
+- `run_path` (identificador relativo da run)
+- `executor_os_user`
+
+Semântica de privacidade de paths:
+- `run_summary.json` e `runs_index.csv` não serializam caminho absoluto sensível;
+- quando necessário, o registro usa apenas nome de config e path relativo mínimo da run.
 
 Regra operacional:
 - `status=FAILED` cobre tanto erro técnico quanto interrupção manual (`KeyboardInterrupt`), por consistência de auditoria.
 
 ## Testes
-Esta suíte possui **24 arquivos de teste** (`tests/test_*.py`).
+Esta suíte possui **24 arquivos de teste** em `tests/test_*.py`.
 
 ### Comando exato para testes herméticos / CI-safe
 Use este comando para validação sem depender de run prévia em `outputs/`:
@@ -618,7 +690,7 @@ pytest -v \
   tests/test_tracking_unit.py
 ```
 
-Tempo esperado (hermético/CI-safe): `[ESTIMAR]`.
+Tempo esperado (hermético/CI-safe): [ESTIMAR] ~30-60s em CPU 4-core (dominado por imports de TensorFlow).
 
 ### Sequência para suíte completa após uma run de treino
 1. Gerar uma run recente em `outputs/`:
@@ -639,8 +711,8 @@ $env:STABILITY_TF_DEVICE="cpu"
 pytest tests/test_stability.py -v
 ```
 
-Tempo esperado (suíte completa): `[ESTIMAR]`.  
-Tempo esperado (somente estabilidade): `[ESTIMAR]`.
+Tempo esperado (suíte completa): [ESTIMAR] ~2-5 min em CPU 4-core (depende de epochs e volume de dados).  
+Tempo esperado (somente estabilidade): [ESTIMAR] ~1-3 min (duas runs com `--epochs 1`).
 
 ### Grupos funcionais (24 testes)
 1. **Integridade e utilitários de infraestrutura**  
@@ -784,5 +856,7 @@ Contrato dos serviços GPU no compose:
 - com volumes bind (`./data`, `./outputs`), permissões de escrita no host devem aceitar o UID/GID do processo no container (usuário `sspdf`, UID 1000).
 
 ## Limitações Conhecidas
-- Em GPU, determinismo bit-a-bit não é garantido para todas as operações.
+- Em GPU, determinismo bit-a-bit não é garantido para todas as operações (dependente de stack CUDA/cuDNN).
 - Sem ground truth rotulado, métricas são de consistência/concordância, não de performance supervisionada real.
+- Docker: o Dockerfile atual não define `ENTRYPOINT` (apenas `CMD`). Os serviços no `docker-compose.yml` definem `entrypoint` por serviço para resolver o contrato de `compose run`. Para `docker run` direto (sem compose), os parâmetros devem ser passados após o comando completo: `docker run --rm sspdf-anomalias python -m src.main --input ...`.
+- Cobertura temporal pode ser inferior a 100% quando veículos não possuem sequências GPS contíguas suficientes para `window_size`.

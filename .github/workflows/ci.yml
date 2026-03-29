@@ -11,6 +11,11 @@ env:
   TF_CPP_MIN_LOG_LEVEL: "3"
   SSPDF_LOG_DIR: "/tmp/sspdf_logs"
   SSPDF_DISABLE_TRACKING: "true"
+  # SECURITY GOVERNANCE:
+  # GHSA-34jh-p97f-mpxf esta temporariamente suprimido por dependencia transiente
+  # acoplada ao stack TensorFlow 2.12.x (upgrade maior sera tratado em etapa propria).
+  # Revisao obrigatoria: remover esta supressao na proxima janela de upgrade de runtime.
+  PIP_AUDIT_IGNORE: "GHSA-34jh-p97f-mpxf"
 
 jobs:
   lint:
@@ -85,5 +90,4 @@ jobs:
       - name: Instalar pip-audit
         run: pip install pip-audit
       - name: Auditar dependencias
-        run: pip-audit -r requirements.txt --ignore-vuln GHSA-34jh-p97f-mpxf
-        continue-on-error: true
+        run: pip-audit -r requirements.txt --ignore-vuln "${PIP_AUDIT_IGNORE}"

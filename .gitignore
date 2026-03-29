@@ -6,6 +6,19 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
+# Variaveis de ambiente (NUNCA commitar o .env real)
+.env
+.env.*
+!.env.example
+
+# Configuracao MLflow local (pode conter credenciais de servidor remoto)
+.mlflow_config
+!.mlflow_config.example
+
+# Artefato local de inspeção de coleta do pytest
+.pytest_collect.txt
+
+
 # =============================================================================
 # Outputs — REGRA: Todo output deve estar DENTRO de outputs/ ou outputs_<nome>/
 # Jamais criar pastas de resultado na raiz do projeto.
@@ -41,4 +54,4 @@ mlartifacts/
 ! .vscode/launch.json
 .cursor/
 .cursorrules
-.gemini/
+.gemini/

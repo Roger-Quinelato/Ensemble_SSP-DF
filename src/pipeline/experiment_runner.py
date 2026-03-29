@@ -10,6 +10,7 @@ from src.utils.ensemble_decision import (
 from src.utils.model_selection import compute_val_stability_metrics
 from src.utils.artifact_utils import sha256_file
 from src.utils.git_utils import format_model_version, get_git_info
+from src.utils.logger_utils import resolve_os_user
 from src.utils.tf_runtime import setup_deterministic_runtime
 from config.feature_config import get_features_for_model
 import os
@@ -228,6 +229,23 @@ def _resolve_operational_percentile_config(config):
     params["percentis_teste"] = parsed
     operational = 95 if 95 in parsed else parsed[0]
     return operational, parsed
+
+
+def _sanitize_config_name(config_path):
+    """Retorna apenas o nome do arquivo de configuracao (sem path sensivel)."""
+    if config_path is None:
+        return "N/A"
+    return os.path.basename(os.path.normpath(str(config_path)))
+
+
+def _build_public_run_path(output_dir, run_id):
+    """
+    Gera identificador de path minimo para auditoria sem serializar caminho absoluto.
+    Ex.: outputs/20260329_101010
+    """
+    normalized = os.path.normpath(str(output_dir))
+    parent_name = os.path.basename(os.path.dirname(normalized)) or "outputs"
+    return f"{parent_name}/{run_id}"
 
 
 def _write_run_summary(metrics_dir, summary_payload):
@@ -1176,6 +1194,9 @@ def run_experiment(
         run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     output_dir, run_id = _resolve_versioned_output_dir(output_dir, run_id)
+    config_name_for_audit = _sanitize_config_name(config_path)
+    run_path_for_audit = _build_public_run_path(output_dir, run_id)
+    executor_os_user = resolve_os_user()
     metrics_dir = os.path.join(output_dir, "metrics")
     master_dir = os.path.join(output_dir, "master_table")
     models_dir = os.path.join(output_dir, "models_saved")
@@ -1210,7 +1231,8 @@ def run_experiment(
 
     sspdf_logger.setLevel(logging.INFO)
     sspdf_logger.info(f"Logger configurado para run_id={run_id}")
-    sspdf_logger.info(f"Output dir versionado: {output_dir}")
+    sspdf_logger.info(f"Executor SO: {executor_os_user}")
+    sspdf_logger.info(f"Run path (publico): {run_path_for_audit}")
     from src.utils.tracking import (
         end_run,
         init_experiment,
@@ -1400,12 +1422,15 @@ def run_experiment(
         run_entry = {
             "run_id": run_id,
             "timestamp": datetime.datetime.now().isoformat(),
-            "output_dir": output_dir,
+            "output_dir": run_path_for_audit,
+            "run_path": run_path_for_audit,
             "model_version": model_version,
             "commit_hash": git_info["commit_hash"],
             "branch": git_info["branch"],
             "is_dirty": git_info["is_dirty"],
-            "config_path": config_path,
+            "config_path": config_name_for_audit,
+            "config_name": config_name_for_audit,
+            "executor_os_user": executor_os_user,
             "n_records": len(df),
             "operational_percentile": operational_percentile,
             "n_alerts_operational": alert_counters["n_alerts_operational"],
@@ -1465,8 +1490,11 @@ def run_experiment(
             "run_id": run_id,
             "run_timestamp_start": run_started_at,
             "run_timestamp_end": datetime.datetime.now().isoformat(),
-            "config_path": config_path,
-            "output_dir": output_dir,
+            "config_path": config_name_for_audit,
+            "config_name": config_name_for_audit,
+            "output_dir": run_path_for_audit,
+            "run_path": run_path_for_audit,
+            "executor_os_user": executor_os_user,
             "status": run_status,
             "failed_stage": failed_stage,
             "error_message": error_message,
