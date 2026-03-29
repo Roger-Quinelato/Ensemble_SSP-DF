@@ -8,12 +8,17 @@ import pytest
 import pandas as pd
 from src.data.data_processor import DataProcessor
 import yaml
+from pathlib import Path
 
 
 def _ensure_min_records(input_path, tmp_path, min_records=100):
     """
     Garante dataset de teste com no minimo min_records linhas para satisfazer schema.
     """
+    input_file = Path(input_path)
+    if not input_file.exists():
+        pytest.skip(f"Arquivo de amostra nao encontrado: {input_path}")
+
     df = pd.read_csv(input_path)
     if df.empty:
         pytest.skip("Arquivo de amostra vazio para testes de DataProcessor")

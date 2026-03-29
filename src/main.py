@@ -11,10 +11,7 @@ import argparse
 import datetime
 import logging
 import os
-import random
 import sys
-
-import numpy as np
 
 # Suporte a execucao direta: python src/main.py
 if __package__ is None or __package__ == "":
@@ -22,7 +19,7 @@ if __package__ is None or __package__ == "":
 
 logger = logging.getLogger("sspdf")
 from src.utils.logger_utils import setup_logger
-from src.utils.tf_runtime import configure_tensorflow_runtime
+from src.utils.tf_runtime import setup_deterministic_runtime
 
 
 def parse_args():
@@ -83,25 +80,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def set_global_seed(seed):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["TF_DETERMINISTIC_OPS"] = "1"
-    os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
-    random.seed(seed)
-    np.random.seed(seed)
-
-
 def main():
     args = parse_args()
     setup_logger(name="sspdf")
     if args.verbose:
         logging.getLogger("sspdf").setLevel(logging.DEBUG)
-    set_global_seed(args.seed)
-
-    # Importar TensorFlow DEPOIS de definir variaveis de ambiente e seeds.
-    tf, tf_runtime = configure_tensorflow_runtime(args.tf_device)
-
-    tf.random.set_seed(args.seed)
+    _, tf_runtime = setup_deterministic_runtime(
+        seed=args.seed,
+        tf_device=args.tf_device,
+    )
 
     from src.pipeline.experiment_runner import run_experiment
 
@@ -130,6 +117,7 @@ def main():
             epochs=args.epochs,
             seed=args.seed,
             run_id=run_id,
+            tf_device=args.tf_device,
         )
 
         logger.info(f"Pipeline concluido. Outputs em: {output_dir_final}")

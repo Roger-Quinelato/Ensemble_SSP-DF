@@ -1,7 +1,6 @@
 import logging
 
 from src.utils.evaluation import ThresholdOptimizer, ModelConcordanceAnalyzer
-from src.models.temporal_autoencoder import TemporalAutoencoder
 from src.models.models_base import BaselineModels
 from src.data.data_processor import DataProcessor
 from src.utils.ensemble_decision import (
@@ -11,6 +10,7 @@ from src.utils.ensemble_decision import (
 from src.utils.model_selection import compute_val_stability_metrics
 from src.utils.artifact_utils import sha256_file
 from src.utils.git_utils import format_model_version, get_git_info
+from src.utils.tf_runtime import setup_deterministic_runtime
 from config.feature_config import get_features_for_model
 import os
 import csv
@@ -24,6 +24,7 @@ import joblib
 
 logger = logging.getLogger("sspdf")
 RUN_ID_PATTERN = re.compile(r"^\d{8}_\d{6}$")
+FEATURE_SCHEMA_FILENAME = "feature_schema.json"
 
 
 def _resolve_versioned_output_dir(output_dir, run_id):
@@ -132,6 +133,138 @@ def _build_train_stats(df_train, map_cols):
         "local_mais_fluxo_latitude": float(local_mais_fluxo[map_cols["latitude"]]),
         "local_mais_fluxo_longitude": float(local_mais_fluxo[map_cols["longitude"]]),
         "fluxo_veiculos_local": int(local_mais_fluxo[map_cols["placa"]]),
+    }
+
+
+def _build_feature_schema_payload(stats):
+    """
+    Monta payload de schema de features usado no treino.
+
+    Guarda a ordem esperada para alinhamento da inferencia.
+    """
+    if not isinstance(stats, dict):
+        return {}
+
+    payload = {
+        "schema_version": 1,
+        "main_scaler_features": list(stats.get("main_scaler_features", []) or []),
+        "iso_features": list(stats.get("features_iso", []) or []),
+        "hbos_features": list(stats.get("features_hbos", []) or []),
+        "gru_features": list(stats.get("features_gru", []) or []),
+        "generated_at": datetime.datetime.now().isoformat(),
+    }
+
+    if not any(
+        payload.get(k)
+        for k in ("main_scaler_features", "iso_features", "hbos_features", "gru_features")
+    ):
+        return {}
+    return payload
+
+
+def _resolve_main_scaler_features(proc):
+    """
+    Resolve ordem canonica do scaler principal para persistencia no schema.
+
+    Prioridade:
+    1) scaler.feature_names_in_ (fonte de verdade apos fit)
+    2) proc.features_to_use (fallback de compatibilidade)
+    """
+    scaler = getattr(proc, "scaler", None)
+    scaler_features = getattr(scaler, "feature_names_in_", None)
+    if scaler_features is not None and len(scaler_features) > 0:
+        return list(scaler_features)
+
+    fallback_features = list(getattr(proc, "features_to_use", []) or [])
+    if fallback_features:
+        logger.warning(
+            "Nao foi possivel obter scaler.feature_names_in_; "
+            "persistindo main_scaler_features via fallback proc.features_to_use."
+        )
+    return fallback_features
+
+
+def _resolve_primary_percentile(config):
+    """
+    Resolve percentil operacional principal para decisao final.
+
+    Mantido por compatibilidade com chamadas legadas.
+    A resolucao canonica fica centralizada em
+    _resolve_operational_percentile_config().
+    """
+    operational, _ = _resolve_operational_percentile_config(config)
+    return operational
+
+
+def _resolve_operational_percentile_config(config):
+    """
+    Normaliza percentis configurados e define percentil operacional.
+
+    Regra:
+    - lista vazia/invalida -> [95]
+    - se 95 existir -> operacional=95
+    - caso contrario -> operacional=primeiro percentil valido
+
+    Returns:
+        tuple: (operational_percentile, normalized_percentiles)
+    """
+    params = config.setdefault("parametros", {})
+    raw_percentiles = params.get("percentis_teste", [])
+
+    parsed = []
+    for value in raw_percentiles:
+        try:
+            p = int(value)
+        except Exception:
+            continue
+        if not 0 <= p <= 100:
+            continue
+        if p not in parsed:
+            parsed.append(p)
+
+    if not parsed:
+        parsed = [95]
+
+    params["percentis_teste"] = parsed
+    operational = 95 if 95 in parsed else parsed[0]
+    return operational, parsed
+
+
+def _write_run_summary(metrics_dir, summary_payload):
+    """Persist run_summary.json de forma resiliente."""
+    os.makedirs(metrics_dir, exist_ok=True)
+    log_json_path = os.path.join(metrics_dir, "run_summary.json")
+    with open(log_json_path, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2, default=str)
+    return log_json_path
+
+
+def _compute_alert_counters(df, operational_percentile):
+    """
+    Consolida contadores de alerta para manter semantica consistente entre
+    runs_index, run_summary e tracking.
+    """
+    has_df = isinstance(df, pd.DataFrame)
+    has_ensemble_alert = has_df and "ensemble_alert" in df.columns
+
+    n_alerts_operational = (
+        int(df["ensemble_alert"].eq(1.0).sum()) if has_ensemble_alert else "N/A"
+    )
+    n_alerts_p95 = (
+        n_alerts_operational
+        if has_ensemble_alert and int(operational_percentile) == 95
+        else "N/A"
+    )
+    n_not_scored = (
+        int(df["n_models_scored"].eq(0).sum())
+        if has_df and "n_models_scored" in df.columns
+        else "N/A"
+    )
+
+    return {
+        "n_alerts_operational": n_alerts_operational,
+        "n_alerts_p95": n_alerts_p95,
+        "n_not_scored": n_not_scored,
     }
 
 
@@ -275,7 +408,13 @@ def prepare_model_features(df, df_train, config, proc, models_dir):
     }
 
 
-def train_base_models(df, features_dict, config, models_dir):
+def train_base_models(
+    df,
+    features_dict,
+    config,
+    models_dir,
+    operational_percentile,
+):
     """
     Treina Isolation Forest e HBOS em multiplas configuracoes.
     """
@@ -321,7 +460,13 @@ def train_base_models(df, features_dict, config, models_dir):
             df, f"{tag}_score", tag, calibration_scores=scores_train
         )
         results_summary.extend(metrics)
-        iso_masks_registry[tag] = df[f"{tag}_p95_label"] == 0
+        label_col = f"{tag}_p{operational_percentile}_label"
+        if label_col not in df.columns:
+            raise RuntimeError(
+                f"Label operacional ausente para {tag}: {label_col}. "
+                f"Percentis configurados: {config.get('parametros', {}).get('percentis_teste', [])}"
+            )
+        iso_masks_registry[tag] = df[label_col] == 0
 
     logger.info("-" * 40)
     logger.info("TREINANDO VARIACOES HBOS")
@@ -347,7 +492,13 @@ def train_base_models(df, features_dict, config, models_dir):
             df, f"{tag}_score", tag, calibration_scores=scores_train
         )
         results_summary.extend(metrics)
-        hbos_masks_registry[tag] = df[f"{tag}_p95_label"] == 0
+        label_col = f"{tag}_p{operational_percentile}_label"
+        if label_col not in df.columns:
+            raise RuntimeError(
+                f"Label operacional ausente para {tag}: {label_col}. "
+                f"Percentis configurados: {config.get('parametros', {}).get('percentis_teste', [])}"
+            )
+        hbos_masks_registry[tag] = df[label_col] == 0
 
     if not iso_masks_registry:
         raise RuntimeError("PIPELINE ABORTADO: Nenhum modelo Isolation Forest foi treinado.")
@@ -402,6 +553,10 @@ def train_temporal_models(
         "optimizer": temporal_config.get("optimizer", "adam"),
         "loss": temporal_config.get("loss", "mse"),
     }
+
+    # Import tardio para evitar carregar TensorFlow/Keras antes da configuracao
+    # deterministica de runtime feita em run_experiment().
+    from src.models.temporal_autoencoder import TemporalAutoencoder
 
     temporal_pipe = TemporalAutoencoder(
         X_data=features_dict["x_gru_all"],
@@ -567,6 +722,7 @@ def export_results(
     run_id=None,
     git_info=None,
     model_version=None,
+    operational_percentile=None,
 ):
     """
     Exporta resultados, metricas e analise de concordancia.
@@ -617,15 +773,22 @@ def export_results(
             f"({df['temporal_coverage'].mean()*100:.1f}%)"
         )
 
+    decision_percentile = (
+        int(operational_percentile)
+        if operational_percentile is not None
+        else _resolve_primary_percentile(config)
+    )
+
     # Camada de decisao final do ensemble
     logger.info("Calculando decisao final do ensemble...")
-    df = compute_ensemble_decision(df, percentile=95)
+    df = compute_ensemble_decision(df, percentile=decision_percentile)
 
     # --- COBERTURA DE AVALIACAO POR MODELO ---
-    p95_label_cols = [c for c in df.columns if c.endswith("_p95_label")]
-    iso_label_cols = [c for c in p95_label_cols if c.startswith("ISO")]
-    hbos_label_cols = [c for c in p95_label_cols if c.startswith("HBOS")]
-    temp_label_cols = [c for c in p95_label_cols if c.startswith("Temporal")]
+    p_label_suffix = f"_p{decision_percentile}_label"
+    percentile_label_cols = [c for c in df.columns if c.endswith(p_label_suffix)]
+    iso_label_cols = [c for c in percentile_label_cols if c.startswith("ISO")]
+    hbos_label_cols = [c for c in percentile_label_cols if c.startswith("HBOS")]
+    temp_label_cols = [c for c in percentile_label_cols if c.startswith("Temporal")]
 
     # Quantos modelos de cada tipo avaliaram este registro
     df["coverage_iso"] = df[iso_label_cols].notna().sum(axis=1).astype(int)
@@ -713,7 +876,11 @@ def export_results(
             )
 
     # Ranking de risco por veiculo
-    vehicle_risk = compute_vehicle_risk_summary(df, placa_col=map_cols["placa"])
+    vehicle_risk = compute_vehicle_risk_summary(
+        df,
+        placa_col=map_cols["placa"],
+        percentile=decision_percentile,
+    )
     if not vehicle_risk.empty:
         vehicle_risk.to_csv(
             os.path.join(metrics_dir, "vehicle_risk_ranking.csv"), index=False
@@ -782,7 +949,10 @@ def export_results(
             c for c in score_columns_audit if c.startswith("ISO") or c.startswith("HBOS")
         ]
         df_model_selection = compute_val_stability_metrics(
-            df_train_scored, df_val_scored, score_cols_for_selection, percentile=95
+            df_train_scored,
+            df_val_scored,
+            score_cols_for_selection,
+            percentile=decision_percentile,
         )
         if not df_model_selection.empty:
             df_model_selection.to_csv(
@@ -795,11 +965,19 @@ def export_results(
             "Execute com split 60/20/20 para usar este recurso sem leakage."
         )
 
+    report_required = bool(
+        config.get("configuracoes_gerais", {}).get("report_required", True)
+    )
+    report_status = "not_attempted"
+    report_error = None
+    report_path = os.path.join(os.path.dirname(metrics_dir), "relatorio_executivo.html")
+
     df.to_parquet(os.path.join(master_dir, "resultado_final.parquet"), index=False)
     if stats is not None:
         # Adicionar run_id ao perfil para rastreabilidade
         stats["run_id"] = run_id if run_id else "unversioned"
         stats["run_timestamp"] = datetime.datetime.now().isoformat()
+        stats["operational_percentile"] = int(decision_percentile)
         with open(os.path.join(metrics_dir, "perfil_dados.json"), "w") as f:
             json.dump(stats, f, indent=4, default=str)
         logger.info(f"Perfil de dados salvo com run_id={stats['run_id']}")
@@ -808,36 +986,44 @@ def export_results(
         try:
             from src.outputs.report_generator import generate_report
 
-            report_path = os.path.join(
-                os.path.dirname(metrics_dir), "relatorio_executivo.html"
-            )
             generate_report(
                 metrics_dir=metrics_dir,
                 parquet_path=os.path.join(master_dir, "resultado_final.parquet"),
                 output_path=report_path,
                 run_id=run_id or "N/A",
+                operational_percentile=decision_percentile,
             )
             size_kb = os.path.getsize(report_path) / 1024 if os.path.exists(report_path) else 0
             logger.info(f"Relatorio HTML gerado: {report_path} ({size_kb:.0f} KB)")
+            report_status = "success"
         except ImportError:
-            logger.warning(
-                "AVISO: plotly nao instalado - relatorio HTML nao gerado. "
+            report_status = "failed"
+            report_error = (
+                "plotly nao instalado - relatorio HTML nao gerado. "
                 "Instale com: pip install 'plotly>=5.18.0'"
             )
+            logger.warning(f"AVISO: {report_error}")
         except FileNotFoundError as e:
-            logger.error(
-                f"ERRO ao gerar relatorio HTML: arquivo nao encontrado: {e}\n"
+            report_status = "failed"
+            report_error = (
+                f"arquivo nao encontrado: {e}. "
                 "Verificar que vehicle_risk_ranking.csv e concordancia_modelos.csv "
-                "foram gerados pelos fixes C3 e H2 antes deste fix."
+                "foram gerados."
             )
+            logger.error(f"ERRO ao gerar relatorio HTML: {report_error}")
         except Exception as e:
-            logger.error(
-                f"ERRO ao gerar relatorio HTML: {e}\n"
-                "Stack trace completo nos logs de debug."
-            )
+            report_status = "failed"
+            report_error = str(e)
+            logger.error(f"ERRO ao gerar relatorio HTML: {e}")
             import traceback
 
             logger.debug(traceback.format_exc())
+    else:
+        report_status = "failed"
+        report_error = "stats indisponivel para gerar relatorio."
+        logger.error(
+            "Relatorio HTML nao foi gerado porque stats estao indisponiveis."
+        )
 
     map_cols = config["mapeamento_colunas"]
     id_cols = [
@@ -856,6 +1042,17 @@ def export_results(
         os.path.join(metrics_dir, "temporal_results.csv"), index=False
     )
     logger.info("Resultados segmentados exportados.")
+
+    feature_schema_path = None
+    feature_schema_payload = _build_feature_schema_payload(stats)
+    if feature_schema_payload:
+        feature_schema_path = os.path.join(models_dir, FEATURE_SCHEMA_FILENAME)
+        with open(feature_schema_path, "w", encoding="utf-8") as f:
+            json.dump(feature_schema_payload, f, indent=2)
+        logger.info(
+            "Schema de features do treino salvo para inferencia: "
+            f"{feature_schema_path}"
+        )
 
     # Gerar manifesto dos modelos para uso pelo inference.py (com hash de integridade)
     manifest = {"iso": [], "hbos": [], "temporal": [], "scalers": {}}
@@ -920,6 +1117,13 @@ def export_results(
                 "sha256": sha256_file(thresh_path),
             }
 
+    if feature_schema_path and os.path.exists(feature_schema_path):
+        manifest["feature_schema"] = {
+            "path": os.path.relpath(feature_schema_path, models_dir),
+            "type": "json",
+            "sha256": sha256_file(feature_schema_path),
+        }
+
     # Rastreabilidade de versao do codigo de treinamento.
     git_info = git_info or get_git_info()
     model_version = model_version or format_model_version(git_info, run_id or "unknown")
@@ -948,6 +1152,13 @@ def export_results(
         json.dump(manifest, f, indent=2)
     logger.info(f"Manifesto de modelos salvo: {manifest_path}")
 
+    return {
+        "report_required": report_required,
+        "report_status": report_status,
+        "report_error": report_error,
+        "report_path": report_path,
+    }
+
 
 def run_experiment(
     config_path="config_mapeamento.yaml",
@@ -956,6 +1167,7 @@ def run_experiment(
     epochs=None,
     seed=42,
     run_id=None,
+    tf_device="auto",
 ):
     """
     Orquestra o pipeline completo de deteccao de anomalias.
@@ -999,29 +1211,6 @@ def run_experiment(
     sspdf_logger.setLevel(logging.INFO)
     sspdf_logger.info(f"Logger configurado para run_id={run_id}")
     sspdf_logger.info(f"Output dir versionado: {output_dir}")
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    global_seed = config.get("random_state", seed)
-    np.random.seed(global_seed)
-
-    # Precedencia explicita: CLI > YAML > fallback hardcoded
-    yaml_epochs = config.get("parametros", {}).get("temporal", {}).get("epochs", 10)
-    if epochs is None:
-        # Usuario nao passou --epochs: usar YAML
-        epochs = yaml_epochs
-        logger.info(f"--epochs nao informado. Usando valor do YAML: {epochs} epochs")
-    else:
-        # Usuario passou --epochs explicitamente: respeitar
-        logger.info(
-            f"--epochs={epochs} (explicito via CLI). "
-            f"Valor do YAML ({yaml_epochs}) ignorado."
-        )
-
-    # Propaga epochs efetivas para o config consumido pelo treino temporal.
-    config.setdefault("parametros", {}).setdefault("temporal", {})["epochs"] = epochs
-
     from src.utils.tracking import (
         end_run,
         init_experiment,
@@ -1030,206 +1219,338 @@ def run_experiment(
         log_params,
     )
 
-    # Iniciar MLflow run (se disponivel e nao desativado)
-    _tracking_run = init_experiment(run_id=run_id)
-    git_info = get_git_info()
-    model_version = format_model_version(git_info, run_id)
+    config = {}
+    stats = {}
+    df = pd.DataFrame()
+    global_seed = seed
+    current_stage = "INICIALIZACAO"
+    failed_stage = None
+    run_status = "SUCCESS"
+    error_message = None
+    captured_exception = None
+    _tracking_run = None
+    report_required = True
+    report_status = "not_attempted"
+    report_error = None
+    operational_percentile = 95
+    configured_percentiles = [95]
+    run_started_at = datetime.datetime.now().isoformat()
+    git_info = {
+        "commit_hash": "unknown",
+        "commit_short": "unknown",
+        "branch": "unknown",
+        "is_dirty": None,
+        "dirty_warning": None,
+        "commit_message": None,
+        "commit_timestamp": None,
+    }
+    model_version = f"unknown-{run_id}"
 
-    if _tracking_run:
-        # Logar todos os parametros do YAML centralizado
-        iso_cfg = config.get("parametros", {}).get("isolation_forest", {})
-        hbos_cfg = config.get("parametros", {}).get("hbos", {})
-        temp_cfg = config.get("parametros", {}).get("temporal", {})
-        split = config.get("parametros", {}).get("split_ratios", {})
-        log_params(
-            {
-                "run_id": run_id,
+    try:
+        current_stage = "CONFIGURACAO"
+        with open(config_path, encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+
+        global_seed = config.get("random_state", seed)
+        operational_percentile, configured_percentiles = _resolve_operational_percentile_config(
+            config
+        )
+        logger.info(
+            f"Percentil operacional efetivo: p{operational_percentile} "
+            f"| percentis_teste={configured_percentiles}"
+        )
+        report_required = bool(
+            config.get("configuracoes_gerais", {}).get("report_required", True)
+        )
+
+        # Precedencia explicita: CLI > YAML > fallback hardcoded
+        yaml_epochs = config.get("parametros", {}).get("temporal", {}).get("epochs", 10)
+        if epochs is None:
+            # Usuario nao passou --epochs: usar YAML
+            epochs = yaml_epochs
+            logger.info(f"--epochs nao informado. Usando valor do YAML: {epochs} epochs")
+        else:
+            # Usuario passou --epochs explicitamente: respeitar
+            logger.info(
+                f"--epochs={epochs} (explicito via CLI). "
+                f"Valor do YAML ({yaml_epochs}) ignorado."
+            )
+
+        # Propaga epochs efetivas para o config consumido pelo treino temporal.
+        config.setdefault("parametros", {}).setdefault("temporal", {})["epochs"] = epochs
+
+        _, tf_runtime = setup_deterministic_runtime(
+            seed=global_seed,
+            tf_device=tf_device,
+        )
+        logger.info(
+            f"Runtime deterministico ativo no run_experiment | seed={global_seed} "
+            f"| tf_device={tf_runtime['requested']} | tf_ativo={tf_runtime['active']} "
+            f"| gpus_detectadas={tf_runtime['gpu_count']}"
+        )
+
+        # Iniciar MLflow run (se disponivel e nao desativado)
+        _tracking_run = init_experiment(run_id=run_id)
+        git_info = get_git_info()
+        model_version = format_model_version(git_info, run_id)
+
+        if _tracking_run:
+            # Logar todos os parametros do YAML centralizado
+            iso_cfg = config.get("parametros", {}).get("isolation_forest", {})
+            hbos_cfg = config.get("parametros", {}).get("hbos", {})
+            temp_cfg = config.get("parametros", {}).get("temporal", {})
+            split = config.get("parametros", {}).get("split_ratios", {})
+            log_params(
+                {
+                    "run_id": run_id,
+                    "seed": global_seed,
+                    "epochs": epochs,
+                    "split_train": split.get("train", 0.6),
+                    "split_val": split.get("validation", 0.2),
+                    "split_test": split.get("test", 0.2),
+                    "iso_n_estimators": str(iso_cfg.get("n_estimators", [100, 200])),
+                    "iso_contamination": iso_cfg.get("contamination", "auto"),
+                    "hbos_n_bins": str(hbos_cfg.get("n_bins", [10, 20])),
+                    "hbos_contamination": hbos_cfg.get("contamination", 0.1),
+                    "temporal_arch": temp_cfg.get("arch_type", "gru"),
+                    "temporal_window_size": temp_cfg.get("window_size", 3),
+                    "temporal_batch_size": temp_cfg.get("batch_size", 64),
+                    "temporal_dropout": temp_cfg.get("dropout", 0.2),
+                    "percentis_teste": str(configured_percentiles),
+                    "operational_percentile": operational_percentile,
+                }
+            )
+
+        proc = DataProcessor(config)
+        proc.models_dir = models_dir
+
+        logger.info(f"Random state efetivo: {global_seed}")
+        logger.info(f"Epochs temporais efetivas: {epochs}")
+
+        current_stage = "ETAPA 1: CARGA E PROCESSAMENTO DE DADOS"
+        logger.info("=" * 80)
+        logger.info(current_stage)
+        df, df_train, df_val, df_test, proc, stats = load_data(proc, config, input_path)
+        stats["main_scaler_features"] = _resolve_main_scaler_features(proc)
+
+        current_stage = "ETAPA 2: PREPARACAO DE FEATURES POR MODELO"
+        logger.info("=" * 80)
+        logger.info(current_stage)
+        features_dict = prepare_model_features(df, df_train, config, proc, models_dir)
+        stats["features_iso"] = features_dict["iso_features"]
+        stats["features_hbos"] = features_dict["hbos_features"]
+        stats["features_gru"] = features_dict["gru_features"]
+
+        current_stage = "ETAPA 3: TREINAMENTO DE MODELOS BASE"
+        logger.info("=" * 80)
+        logger.info(current_stage)
+        df, iso_masks, hbos_masks, results_summary, score_cols = train_base_models(
+            df,
+            features_dict,
+            config,
+            models_dir,
+            operational_percentile=operational_percentile,
+        )
+
+        current_stage = "ETAPA 4: TREINAMENTO DE MODELOS TEMPORAIS"
+        logger.info("=" * 80)
+        logger.info(current_stage)
+        train_end = stats.get("split_temporal", {}).get("train_end_index")
+        if train_end is None:
+            train_end = int(
+                len(df)
+                * config.get("parametros", {}).get("split_ratios", {}).get("train", 0.6)
+            )
+        df, temporal_results, temporal_cols = train_temporal_models(
+            df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
+        )
+        results_summary.extend(temporal_results)
+        score_cols.extend(temporal_cols)
+
+        current_stage = "ETAPA 5: EXPORTACAO DE RESULTADOS"
+        logger.info("=" * 80)
+        logger.info(current_stage)
+        export_meta = export_results(
+            df,
+            results_summary,
+            score_cols,
+            config,
+            metrics_dir,
+            master_dir,
+            models_dir,
+            df_train=df_train,
+            df_val=df_val,
+            stats=stats,
+            run_id=run_id,
+            git_info=git_info,
+            model_version=model_version,
+            operational_percentile=operational_percentile,
+        )
+        report_required = bool(export_meta.get("report_required", report_required))
+        report_status = export_meta.get("report_status", "not_attempted")
+        report_error = export_meta.get("report_error")
+        if report_required and report_status != "success":
+            raise RuntimeError(
+                "Relatorio HTML obrigatorio nao foi gerado: "
+                f"{report_error or report_status}"
+            )
+
+        index_path = os.path.join(os.path.dirname(output_dir), "runs_index.csv")
+        alert_counters = _compute_alert_counters(df, operational_percentile)
+        run_entry = {
+            "run_id": run_id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "output_dir": output_dir,
+            "model_version": model_version,
+            "commit_hash": git_info["commit_hash"],
+            "branch": git_info["branch"],
+            "is_dirty": git_info["is_dirty"],
+            "config_path": config_path,
+            "n_records": len(df),
+            "operational_percentile": operational_percentile,
+            "n_alerts_operational": alert_counters["n_alerts_operational"],
+            # Campo legado de compatibilidade para dashboards antigos.
+            # Somente preenchido quando o percentil operacional efetivo e 95.
+            "n_alerts_p95": alert_counters["n_alerts_p95"],
+        }
+        target_fields = list(run_entry.keys())
+        existing_rows = []
+        if os.path.exists(index_path):
+            try:
+                with open(index_path, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    raw_rows = list(reader)
+                if raw_rows:
+                    header = raw_rows[0]
+                    for row in raw_rows[1:]:
+                        if not row:
+                            continue
+                        if len(row) == len(target_fields):
+                            row_dict = dict(zip(target_fields, row))
+                        else:
+                            mapped = dict(zip(header, row[: len(header)]))
+                            row_dict = {k: mapped.get(k, "") for k in target_fields}
+                        existing_rows.append(row_dict)
+            except Exception as e:
+                logger.warning(
+                    f"Nao foi possivel ler runs_index existente ({index_path}): {e}. "
+                    "Arquivo sera recriado no schema atual."
+                )
+                existing_rows = []
+
+        existing_rows.append(run_entry)
+        with open(index_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=target_fields)
+            writer.writeheader()
+            writer.writerows(existing_rows)
+        logger.info(f"Indice de runs atualizado: {index_path}")
+
+    except KeyboardInterrupt as e:
+        run_status = "FAILED"
+        failed_stage = current_stage
+        error_message = "KeyboardInterrupt: execucao interrompida pelo usuario."
+        captured_exception = e
+        logger.warning(error_message)
+    except Exception as e:
+        run_status = "FAILED"
+        failed_stage = current_stage
+        error_message = f"{type(e).__name__}: {e}"
+        captured_exception = e
+        logger.exception(
+            f"Falha em {current_stage}. Erro: {e}"
+        )
+    finally:
+        alert_counters = _compute_alert_counters(df, operational_percentile)
+        summary_payload = {
+            "run_id": run_id,
+            "run_timestamp_start": run_started_at,
+            "run_timestamp_end": datetime.datetime.now().isoformat(),
+            "config_path": config_path,
+            "output_dir": output_dir,
+            "status": run_status,
+            "failed_stage": failed_stage,
+            "error_message": error_message,
+            "report_required": report_required,
+            "report_status": report_status,
+            "report_error": report_error,
+            "parameters": {
                 "seed": global_seed,
                 "epochs": epochs,
-                "split_train": split.get("train", 0.6),
-                "split_val": split.get("validation", 0.2),
-                "split_test": split.get("test", 0.2),
-                "iso_n_estimators": str(iso_cfg.get("n_estimators", [100, 200])),
-                "iso_contamination": iso_cfg.get("contamination", "auto"),
-                "hbos_n_bins": str(hbos_cfg.get("n_bins", [10, 20])),
-                "hbos_contamination": hbos_cfg.get("contamination", 0.1),
-                "temporal_arch": temp_cfg.get("arch_type", "gru"),
-                "temporal_window_size": temp_cfg.get("window_size", 3),
-                "temporal_batch_size": temp_cfg.get("batch_size", 64),
-                "temporal_dropout": temp_cfg.get("dropout", 0.2),
-                "percentis_teste": str(
-                    config.get("parametros", {}).get("percentis_teste", [90, 95, 99])
-                ),
-            }
-        )
+                "percentis_teste": configured_percentiles,
+                "operational_percentile": operational_percentile,
+                "split_ratios": config.get("parametros", {}).get("split_ratios", {}),
+                "iso_config": config.get("parametros", {}).get("isolation_forest", {}),
+                "hbos_config": config.get("parametros", {}).get("hbos", {}),
+                "temporal_config": config.get("parametros", {}).get("temporal", {}),
+            },
+            "dataset_profile": {
+                "total_records": len(df) if isinstance(df, pd.DataFrame) else "N/A",
+                "total_vehicles": stats.get("total_veiculos", "N/A"),
+                "period": stats.get("periodo", "N/A"),
+            },
+            "results_summary": {
+                "operational_percentile": operational_percentile,
+                "n_alerts_operational": alert_counters["n_alerts_operational"],
+                # Campo legado de compatibilidade para consumidores historicos.
+                "n_alerts_p95": alert_counters["n_alerts_p95"],
+                "n_not_scored": alert_counters["n_not_scored"],
+            },
+        }
 
-    proc = DataProcessor(config)
-    proc.models_dir = models_dir
-
-    logger.info(f"Random state efetivo: {global_seed}")
-    logger.info(f"Epochs temporais efetivas: {epochs}")
-
-    logger.info("=" * 80)
-    logger.info("ETAPA 1: CARGA E PROCESSAMENTO DE DADOS")
-    df, df_train, df_val, df_test, proc, stats = load_data(proc, config, input_path)
-
-    logger.info("=" * 80)
-    logger.info("ETAPA 2: PREPARACAO DE FEATURES POR MODELO")
-    features_dict = prepare_model_features(df, df_train, config, proc, models_dir)
-    stats["features_iso"] = features_dict["iso_features"]
-    stats["features_hbos"] = features_dict["hbos_features"]
-    stats["features_gru"] = features_dict["gru_features"]
-
-    logger.info("=" * 80)
-    logger.info("ETAPA 3: TREINAMENTO DE MODELOS BASE")
-    df, iso_masks, hbos_masks, results_summary, score_cols = train_base_models(
-        df, features_dict, config, models_dir
-    )
-
-    logger.info("=" * 80)
-    logger.info("ETAPA 4: TREINAMENTO DE MODELOS TEMPORAIS")
-    train_end = stats.get("split_temporal", {}).get("train_end_index")
-    if train_end is None:
-        train_end = int(
-            len(df) * config.get("parametros", {}).get("split_ratios", {}).get("train", 0.6)
-        )
-    df, temporal_results, temporal_cols = train_temporal_models(
-        df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
-    )
-    results_summary.extend(temporal_results)
-    score_cols.extend(temporal_cols)
-
-    logger.info("=" * 80)
-    logger.info("ETAPA 5: EXPORTACAO DE RESULTADOS")
-    export_results(
-        df,
-        results_summary,
-        score_cols,
-        config,
-        metrics_dir,
-        master_dir,
-        models_dir,
-        df_train=df_train,
-        df_val=df_val,
-        stats=stats,
-        run_id=run_id,
-        git_info=git_info,
-        model_version=model_version,
-    )
-
-    index_path = os.path.join(os.path.dirname(output_dir), "runs_index.csv")
-    run_entry = {
-        "run_id": run_id,
-        "timestamp": datetime.datetime.now().isoformat(),
-        "output_dir": output_dir,
-        "model_version": model_version,
-        "commit_hash": git_info["commit_hash"],
-        "branch": git_info["branch"],
-        "is_dirty": git_info["is_dirty"],
-        "config_path": config_path,
-        "n_records": len(df),
-        "n_alerts_p95": (
-            int(df["ensemble_alert"].eq(1.0).sum())
-            if "ensemble_alert" in df.columns
-            else "N/A"
-        ),
-    }
-    target_fields = list(run_entry.keys())
-    existing_rows = []
-    if os.path.exists(index_path):
+        run_summary_path = None
         try:
-            with open(index_path, "r", newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                raw_rows = list(reader)
-            if raw_rows:
-                header = raw_rows[0]
-                for row in raw_rows[1:]:
-                    if not row:
-                        continue
-                    if len(row) == len(target_fields):
-                        row_dict = dict(zip(target_fields, row))
-                    else:
-                        mapped = dict(zip(header, row[: len(header)]))
-                        row_dict = {k: mapped.get(k, "") for k in target_fields}
-                    existing_rows.append(row_dict)
-        except Exception as e:
-            logger.warning(
-                f"Nao foi possivel ler runs_index existente ({index_path}): {e}. "
-                "Arquivo sera recriado no schema atual."
-            )
-            existing_rows = []
+            run_summary_path = _write_run_summary(metrics_dir, summary_payload)
+            logger.info(f"Log estruturado JSON salvo: {run_summary_path}")
+        except Exception as summary_exc:
+            logger.error(f"Falha ao persistir run_summary.json: {summary_exc}")
 
-    existing_rows.append(run_entry)
-    with open(index_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=target_fields)
-        writer.writeheader()
-        writer.writerows(existing_rows)
-    logger.info(f"Indice de runs atualizado: {index_path}")
-
-    structured_log = {
-        "run_id": run_id,
-        "timestamp_start": stats.get("periodo", "N/A"),
-        "timestamp_end": datetime.datetime.now().isoformat(),
-        "config_path": config_path,
-        "output_dir": output_dir,
-        "parameters": {
-            "seed": global_seed,
-            "epochs": epochs,
-            "split_ratios": config.get("parametros", {}).get("split_ratios", {}),
-            "iso_config": config.get("parametros", {}).get("isolation_forest", {}),
-            "hbos_config": config.get("parametros", {}).get("hbos", {}),
-            "temporal_config": config.get("parametros", {}).get("temporal", {}),
-        },
-        "dataset_profile": {
-            "total_records": len(df),
-            "total_vehicles": stats.get("total_veiculos", "N/A"),
-            "period": stats.get("periodo", "N/A"),
-        },
-        "results_summary": {
-            "n_alerts_p95": (
-                int(df.get("ensemble_alert", pd.Series(dtype=float)).eq(1.0).sum())
-                if "ensemble_alert" in df.columns
-                else "N/A"
-            ),
-            "n_not_scored": (
-                int(df.get("n_models_scored", pd.Series(dtype=float)).eq(0).sum())
-                if "n_models_scored" in df.columns
-                else "N/A"
-            ),
-        },
-        "status": "SUCCESS",
-    }
-    log_json_path = os.path.join(metrics_dir, "run_summary.json")
-    with open(log_json_path, "w") as f:
-        json.dump(structured_log, f, indent=2, default=str)
-    logger.info(f"Log estruturado JSON salvo: {log_json_path}")
-
-    # Logar metricas de resultado no MLflow
-    if "ensemble_alert" in df.columns:
-        n_alerts = int((df["ensemble_alert"] == 1.0).sum())
-        n_total = len(df)
-        log_metrics(
-            {
+        # Logar metricas de resultado no MLflow apenas quando houve sucesso.
+        if (
+            run_status == "SUCCESS"
+            and isinstance(df, pd.DataFrame)
+            and "ensemble_alert" in df.columns
+        ):
+            n_alerts = int((df["ensemble_alert"] == 1.0).sum())
+            n_total = len(df)
+            metrics_payload = {
                 "n_records_total": n_total,
-                "n_alerts_p95": n_alerts,
-                "alert_rate_pct": round(n_alerts / n_total * 100, 4) if n_total > 0 else 0,
+                "operational_percentile": float(operational_percentile),
+                "n_alerts_operational": n_alerts,
+                "alert_rate_pct": (
+                    round(n_alerts / n_total * 100, 4) if n_total > 0 else 0
+                ),
                 "n_not_scored": (
-                    int((df.get("n_models_scored", pd.Series(dtype=float)) == 0).sum())
+                    int(
+                        (
+                            df.get("n_models_scored", pd.Series(dtype=float)) == 0
+                        ).sum()
+                    )
                     if "n_models_scored" in df.columns
                     else 0
                 ),
             }
-        )
+            if int(operational_percentile) == 95:
+                # Mantido para retrocompatibilidade semantica em pipelines legados.
+                metrics_payload["n_alerts_p95"] = n_alerts
+            log_metrics(metrics_payload)
 
-    # Logar artefatos chave
-    log_artifact(os.path.join(metrics_dir, "perfil_dados.json"))
-    log_artifact(os.path.join(metrics_dir, "concordancia_modelos.csv"))
-    log_artifact(os.path.join(metrics_dir, "vehicle_risk_ranking.csv"))
-    log_artifact(os.path.join(os.path.dirname(metrics_dir), "relatorio_executivo.html"))
+        # Logar artefatos chave (existentes).
+        log_artifact(os.path.join(metrics_dir, "perfil_dados.json"))
+        log_artifact(os.path.join(metrics_dir, "concordancia_modelos.csv"))
+        log_artifact(os.path.join(metrics_dir, "vehicle_risk_ranking.csv"))
+        log_artifact(os.path.join(os.path.dirname(metrics_dir), "relatorio_executivo.html"))
+        if run_summary_path:
+            log_artifact(run_summary_path)
 
-    end_run(status="FINISHED")
+        if run_status == "FAILED":
+            end_run(status="FAILED")
+        else:
+            end_run(status="FINISHED")
+            logger.info("EXPERIMENTO FINALIZADO!")
 
-    logger.info("EXPERIMENTO FINALIZADO!")
+    if captured_exception is not None:
+        raise captured_exception
+
     return output_dir
 
 

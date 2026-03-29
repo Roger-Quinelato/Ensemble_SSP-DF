@@ -6,56 +6,114 @@ Este repositório implementa um pipeline de detecção de anomalias veiculares p
 O sistema combina três famílias de modelos:
 - Isolation Forest: detecção tabular global.
 - HBOS: detecção tabular por histogramas univariados.
-- GRU Autoencoder: detecção temporal por sequência (com LSTM apenas como fallback configurável).
+- GRU Autoencoder: detecção temporal por sequência (com LSTM como fallback configurável).
 
-A decisão final é realizada por ensemble por família (ISO, HBOS, Temporal), com rastreabilidade por `run_id`, manifesto de artefatos e hash de integridade.
+A decisão final é realizada por ensemble por família (ISO, HBOS e Temporal), com rastreabilidade por `run_id`, manifesto de artefatos e hash de integridade.
+
+Nota de codificação: este arquivo deve permanecer em UTF-8. Se algum terminal exibir texto corrompido (mojibake), ajuste o encoding da sessão para UTF-8 antes de visualizar o README.
 
 ## Fluxo do Pipeline
 O treinamento completo (`python -m src.main`) executa 5 etapas:
-
 1. Ingestão e validação de schema.
 2. Feature engineering por partição temporal (treino/val/test), com alinhamento de colunas sem leakage.
 3. Treino dos modelos base (ISO + HBOS).
 4. Treino dos modelos temporais (GRU) nos cenários Union/Inter/Baseline.
 5. Exportação de artefatos: thresholds, manifesto, parquet final e relatório HTML.
 
+## Descrição Técnica e Resultados Esperados
+Esta POC foi desenhada para apoiar triagem analítica de deslocamentos veiculares a partir de telemetria GPS, com ênfase em:
+- detecção não supervisionada de padrões atípicos no nível de registro;
+- agregação de risco por veículo para priorização operacional;
+- reprodutibilidade por `run_id`, metadados git e serialização explícita de thresholds;
+- rastreabilidade de artefatos por `models_manifest.json` com SHA256.
+
+Resultados esperados de uma execução saudável:
+- criação de uma run versionada em `outputs/<run_id>/`;
+- geração de `models_manifest.json` e thresholds por percentil configurado em `parametros.percentis_teste`;
+- exportação de `resultado_final.parquet` com scores, labels e `ensemble_alert`;
+- geração de `relatorio_executivo.html` com KPIs, ranking por veículo, cobertura temporal e limitações metodológicas;
+- possibilidade de reuso dos mesmos artefatos em `src.pipeline.inference` sem re-treino.
+
+Resultados que o projeto não promete, por desenho:
+- `precision`, `recall` ou `F1` reais sem base rotulada;
+- comprovação de irregularidade operacional;
+- cobertura temporal de 100% para todos os veículos.
+
+### 2.1 Cenários Temporais (Union, Inter, Baseline)
+No fluxo real de `src/pipeline/experiment_runner.py` (`train_temporal_models()`), o treino temporal é executado em três modalidades:
+- `Union`: usa máscara `ISO_inlier OR HBOS_inlier` na posição final de cada sequência, sempre restrita ao período de treino estrito.
+- `Inter`: usa máscara `ISO_inlier AND HBOS_inlier`, também restrita ao treino estrito.
+- `Baseline`: usa somente a máscara de treino estrito por sequência (sem filtro de qualidade tabular por ISO/HBOS).
+
+Detalhes operacionais importantes:
+- O filtro temporal é anti-leakage: a sequência só entra no treino se início e fim estiverem antes do corte treino/validação.
+- `Union` e `Inter` são treinados para cada combinação de variantes ISO x HBOS; o `Baseline` é treinado uma única vez.
+- Os artefatos temporais são exportados em `models_saved/` como `temporal_union_*.h5`, `temporal_inter_*.h5` e `temporal_baseline.h5`, com nomes canônicos no manifesto (`Temporal_Union_*`, `Temporal_Inter_*`, `Temporal_Baseline`).
+
+### 2.2 Critério de Seleção e Leitura de `model_selection_val.csv`
+O arquivo `model_selection_val.csv` é produzido em `export_results()` usando `compute_val_stability_metrics()` (`src/utils/model_selection.py`), com as seguintes regras:
+- referência: distribuição de `df_train` (somente treino);
+- comparação: distribuição de `df_val` (somente validação);
+- métrica principal: `stability_delta_pct = |taxa_anomalia_treino - taxa_anomalia_val|` no percentil operacional;
+- ordenação: menor `stability_delta_pct` recebe melhor `rank_stability`.
+
+Escopo real desse artefato:
+- ele ranqueia **colunas de score ISO/HBOS** (`score_cols_for_selection` filtra apenas prefixos `ISO` e `HBOS`);
+- ele **não faz seleção automática** de `Union` vs `Inter` vs `Baseline`;
+- no estado atual, todos os cenários temporais treinados permanecem ativos e entram na decisão por família no ensemble.
+
+Leitura recomendada para desenvolvedor:
+- usar `model_selection_val.csv` para identificar quais variantes tabulares ficaram mais estáveis entre treino e validação;
+- cruzar esse ranking com os modelos temporais derivados da mesma combinação ISO/HBOS quando for necessário hardening operacional por política interna.
+
 ## Diagrama da Arquitetura Operacional
-O diagrama abaixo cobre as sete camadas do sistema — da ingestão de dados brutos até a camada de auditoria — com todas as variantes de modelo, contratos de artefato e modos de inferência.
+O diagrama abaixo cobre as sete camadas do sistema, da ingestão de dados brutos até a camada de auditoria, com variantes de modelo, contratos de artefato e modos de inferência.
 
 ```mermaid
 flowchart TD
     A["src/main.py<br/>CLI: --config, --input, --output-dir, --epochs, --seed, --tf-device"] --> B["run_experiment()<br/>src/pipeline/experiment_runner.py"]
 
     B --> C["Carga padronizada<br/>DataProcessor.load_and_standardize()<br/>+ validate_input()"]
-    C --> D["Split temporal 60/20/20<br/>treino / validacao / teste"]
-    D --> E["Feature engineering por particao<br/>+ alinhamento de colunas RA_*<br/>+ scaler.joblib"]
-    E --> F["Preparacao por familia<br/>ISO / HBOS / GRU<br/>+ gru_scaler.joblib"]
+    C --> D["Split temporal 60/20/20<br/>treino / validação / teste"]
+    D --> E["Feature engineering por partição<br/>+ alinhamento RA_*<br/>+ scaler.joblib"]
+    E --> F["Preparação por família<br/>ISO / HBOS / GRU<br/>+ gru_scaler.joblib"]
 
-    F --> G["Modelos base<br/>BaselineModels<br/>iso_n*.joblib<br/>hbos_bins*.joblib"]
-    G --> H["Thresholds por treino<br/>p90 / p95 / p99"]
-    G --> I["Mascaras de inlier<br/>para cenarios temporais"]
+    F --> G["Modelos base<br/>iso_n*.joblib<br/>hbos_bins*.joblib"]
+    G --> H["Thresholds por treino<br/>p90 / p95 / p99 (exemplo)"]
+    G --> I["Máscaras de inlier<br/>para cenários temporais"]
 
-    I --> J["Modelos temporais<br/>TemporalAutoencoder<br/>cenarios Union / Inter / Baseline<br/>temporal_*.h5"]
+    I --> J["Modelos temporais<br/>TemporalAutoencoder<br/>Union / Inter / Baseline<br/>temporal_*.h5"]
     J --> H
 
-    H --> K["export_results()<br/>ensemble por familia<br/>ranking por veiculo<br/>concordancia<br/>estabilidade em validacao"]
-    K --> L["outputs/[run_id]/models_saved<br/>manifesto + hashes SHA256<br/>scalers + thresholds + modelos"]
+    H --> K["export_results()<br/>ensemble por família<br/>ranking por veículo<br/>concordância<br/>estabilidade em validação"]
+    K --> L["outputs/[run_id]/models_saved<br/>manifesto + SHA256<br/>scalers + thresholds + modelos"]
     K --> M["outputs/[run_id]/metrics<br/>execution.log<br/>run_summary.json<br/>perfil_dados.json<br/>concordancia_modelos.csv<br/>vehicle_risk_ranking.csv<br/>vehicle_coverage_report.csv<br/>model_selection_val.csv"]
     K --> N["outputs/[run_id]/master_table<br/>resultado_final.parquet"]
     K --> O["src/outputs/report_generator.py<br/>relatorio_executivo.html"]
     K --> P["outputs/runs_index.csv"]
 
     L --> Q["src/pipeline/inference.py<br/>carrega manifesto, scalers, thresholds e modelos"]
-    Q --> R["Inferencia oficial<br/>usa thresholds do treino<br/>valida hash quando disponivel"]
-    Q --> S["Compatibilidade / degradado<br/>sem manifesto: descobre por nome<br/>sem thresholds: recalibra nos dados novos<br/>sem gru_scaler: pula familia temporal"]
+    Q --> R["Inferência oficial<br/>usa thresholds do treino<br/>valida hash quando disponível"]
+    Q --> S["Compatibilidade / degradado<br/>sem manifesto: descobre por nome<br/>sem thresholds: recalibra no lote novo<br/>sem gru_scaler: pula família temporal"]
     R --> T["outputs_inference/<br/>inference_result.parquet<br/>metrics/alertas_ensemble.csv<br/>metrics/vehicle_risk_ranking.csv"]
     S --> T
-
-    M --> U["Suite de testes<br/>contrato de artefatos<br/>regressao semantica<br/>smoke de relatorio<br/>treino -> inferencia"]
-    L --> U
-    N --> U
-    O --> U
 ```
+
+### Camadas do Sistema
+As 7 camadas representadas no diagrama são:
+1. Entrada e orquestração: `src/main.py` resolve parâmetros de execução e aciona `run_experiment()`.
+2. Ingestão e validação: carga padronizada com `DataProcessor.load_and_standardize()` e validação de schema.
+3. Particionamento e preparação de features: split temporal (treino/validação/teste), feature engineering, alinhamento de colunas `RA_*` e ajuste do `scaler.joblib`.
+4. Modelagem tabular base: treino de variantes ISO e HBOS, geração de scores e labels por percentil.
+5. Modelagem temporal multi-cenário: treino `Union`, `Inter` e `Baseline` com `TemporalAutoencoder`, usando `gru_scaler.joblib`.
+6. Exportação e governança de artefatos: thresholds (`thresholds_p<percentil>.json`), `models_manifest.json` com SHA256, parquet final, métricas e relatório.
+7. Inferência operacional: `src/pipeline/inference.py` consome manifesto, schema de features, scalers e thresholds, aplica modelos e gera `ensemble_alert`.
+
+### Decisões de Design
+- Dois scalers separados (`scaler.joblib` e `gru_scaler.joblib`): ISO/HBOS operam em features tabulares; o temporal usa conjunto próprio com `latitude/longitude`, exigindo normalização independente para manter coerência numérica no pipeline.
+- GRU como padrão e LSTM como fallback: o projeto usa `parametros.temporal.arch_type` e, no estado atual, opera com GRU por padrão; LSTM permanece como opção de compatibilidade para cenários específicos.
+- Ensemble por família, não score único global: `compute_ensemble_decision()` calcula voto por família (ISO, HBOS, Temporal) com pesos equivalentes, reduzindo viés de famílias com mais variantes.
+- SHA256 e rastreabilidade: `models_manifest.json` registra caminhos e hashes dos artefatos (incluindo thresholds e schema), além de metadados de versão/git; em inferência estrita, isso suporta validação de integridade e cadeia de auditoria exigida em contexto de órgão público.
 
 ## Modelos
 | Família | Implementação | Escopo | Observação |
@@ -68,23 +126,159 @@ Dois scalers são usados por design:
 - `scaler.joblib`: features tabulares de ISO/HBOS.
 - `gru_scaler.joblib`: features temporais do GRU (inclui lat/lon).
 
+## Requisitos de Software e Hardware
+### Hardware mínimo (CPU)
+| Item | Requisito | Status |
+|---|---|---|
+| CPU | 4 vCPU | Comprovado (README) |
+| RAM | 8 GB | Comprovado (README) |
+| GPU | Não obrigatória | Comprovado (README) |
+| VRAM | Não aplicável no perfil CPU | Comprovado (README) |
+| Disco livre | [ESTIMAR] | [ESTIMAR] |
+
+### Hardware recomendado (GPU)
+| Item | Requisito | Status |
+|---|---|---|
+| CPU | 8+ vCPU | Comprovado (README) |
+| RAM | 16-32 GB (conforme volume de dados) | Comprovado (README) |
+| GPU | NVIDIA compatível com TensorFlow 2.12.x | Comprovado (README + `requirements-gpu.txt` + `Dockerfile.gpu`) |
+| VRAM mínima | [ESTIMAR] | [ESTIMAR] |
+| Disco livre | [ESTIMAR] | [ESTIMAR] |
+| CUDA/cuDNN | [ESTIMAR] (a imagem `tensorflow/tensorflow:2.12.0-gpu` já embute stack compatível, mas versões exatas não são declaradas no repositório) | [ESTIMAR] |
+
+### Software
+| Componente | Versão / Faixa comprovada | Fonte |
+|---|---|---|
+| Python | `3.10` / `3.10.x` | `environment.yml`, `environment.gpu.yml`, `Dockerfile` (`python:3.10-slim`) |
+| TensorFlow (CPU) | `tensorflow-cpu==2.12.0` | `requirements.txt`, `environment.yml` |
+| TensorFlow (GPU) | `tensorflow==2.12.0` | `requirements-gpu.txt`, `environment.gpu.yml`, `Dockerfile.gpu` |
+| Keras | `2.12.0` | `requirements*.txt`, `environment*.yml` |
+| NumPy | `1.23.5` | `requirements*.txt`, `environment*.yml` |
+| scikit-learn | `>=1.3.0` | `requirements*.txt`, `environment*.yml` |
+| pyod | `>=1.1.0` | `requirements*.txt`, `environment*.yml` |
+| pandas | `>=1.5.0` | `requirements*.txt`, `environment*.yml` |
+| pandera | `>=0.18.0,<0.19.0` | `requirements*.txt`, `environment*.yml` |
+| plotly | `>=5.18.0` | `requirements*.txt`, `environment*.yml` |
+| mlflow | `>=2.10.0` | `requirements*.txt`, `environment*.yml` |
+| Docker Engine mínimo | [ESTIMAR] | [ESTIMAR] |
+| Docker Compose mínimo | [ESTIMAR] | [ESTIMAR] |
+
+Sistemas operacionais suportados (pelo que o repositório realmente indica):
+- Linux: suportado (comandos Bash + fluxo Docker documentados).
+- Windows: suportado (comandos PowerShell/CMD documentados).
+- macOS: [ESTIMAR] (há comandos Bash compatíveis, mas sem validação formal registrada no repositório).
+
+Observações operacionais:
+- Para GPU em contêiner, o host deve ter driver NVIDIA e NVIDIA Container Toolkit (documentado no README).
+- Em GPU, determinismo bit-a-bit pode variar por stack do ambiente.
+
 ## Instalação
-### Clonar o repositório
+### 1) Clonar o repositório
 ```bash
 git clone <url-do-repositorio>
 cd Ensemble_SSP-DF
 ```
 
-### pip
+### 2) Pré-condições e estrutura esperada
+Antes da primeira execução, garanta esta estrutura mínima:
+
+```text
+Ensemble_SSP-DF/
+  data/
+    input/
+      amostra_ssp.csv
+  outputs/
+  config_mapeamento.yaml
+  config_mapeamento_epochs_test.yaml
+  config/
+    feature_config.py
+```
+
+Detalhes operacionais do contrato real:
+- `data/input/`: caminho oficial do arquivo de entrada usado no onboarding.
+- `outputs/`: diretório base; o pipeline cria `outputs/<run_id>/...` automaticamente.
+- `config_mapeamento.yaml` (raiz): YAML principal consumido por padrão (`--config` default em `src/main.py`).
+- `config_mapeamento_epochs_test.yaml` (raiz): variação de configuração para cenários específicos de teste.
+- `config/feature_config.py`: contrato de features por família em código (não substitui o YAML da run).
+
+### 3) Preparar `amostra_ssp.csv` para o onboarding
+Opções recomendadas:
+- Opção A (preferencial): usar o `data/input/amostra_ssp.csv` do projeto (ou substituir por versão homologada mantendo o mesmo nome).
+- Opção B (fallback): gerar dado sintético **somente para smoke test/validação de fluxo**, sem valor analítico-operacional.
+
+Exemplo de geração sintética mínima (Bash):
+```bash
+python - <<'PY'
+from datetime import datetime, timedelta
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+Path("data/input").mkdir(parents=True, exist_ok=True)
+rng = np.random.default_rng(42)
+n = 240
+df = pd.DataFrame({
+    "placa": [f"TST{(i % 20):04d}" for i in range(n)],
+    "timestamp": [datetime(2024, 1, 1) + timedelta(minutes=15 * i) for i in range(n)],
+    "latitude": rng.uniform(-15.9, -15.6, n),
+    "longitude": rng.uniform(-47.9, -47.5, n),
+    "regiao_adm": rng.choice(["Plano Piloto", "Taguatinga", "Ceilandia"], n),
+})
+df.to_csv("data/input/amostra_ssp.csv", index=False)
+print("Arquivo gerado: data/input/amostra_ssp.csv")
+PY
+```
+
+### 4) Ambiente virtual (`venv`)
+#### Linux/macOS
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### PowerShell
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 5) pip
 ```bash
 pip install -r requirements.txt
 ```
 
-### conda
+### 6) conda
 ```bash
 conda env create -f environment.yml
 conda activate sspdf-anomalias
 ```
+
+### 7) Smoke test pós-instalação (antes do primeiro treino completo)
+Objetivo: validar ambiente, CLI e fluxo mínimo com custo baixo.
+
+1. Verificar CLIs:
+```bash
+python -m src.main --help
+python -m src.pipeline.inference --help
+```
+
+2. Executar treino de smoke em CPU:
+```bash
+python -m src.main --input data/input/amostra_ssp.csv --epochs 1 --seed 42 --tf-device cpu --output-dir outputs
+```
+
+3. Validar artefatos da run recém-criada:
+- `outputs/<run_id>/models_saved/models_manifest.json`
+- `outputs/<run_id>/models_saved/thresholds_p95.json` (ou outro percentil operacional configurado)
+- `outputs/<run_id>/master_table/resultado_final.parquet`
+- `outputs/<run_id>/metrics/run_summary.json`
+
+Nota de auditabilidade:
+- O uso de `--tf-device cpu` e `--seed 42` no smoke segue o princípio de determinismo adotado em `tests/test_stability.py`.
 
 ## Execução de Treinamento
 Comando base:
@@ -105,19 +299,19 @@ python -m src.main --input <caminho_arquivo.csv> --epochs 10 --seed 123 --output
 Parâmetros CLI (`src/main.py`):
 | Parâmetro | Default | Descrição |
 |---|---|---|
-| `--config` | `config_mapeamento.yaml` | YAML de configuração. |
+| `--config` | `config_mapeamento.yaml` | YAML de configuração principal. |
 | `--input` | `None` | CSV/Parquet de entrada. Se `None`, tenta `data/input/amostra_ssp.csv` e depois `.parquet`. |
 | `--output-dir` | `outputs` | Diretório base; a execução cria `outputs/<run_id>/...`. |
 | `--epochs` | `None` | Se ausente, usa `parametros.temporal.epochs` do YAML. |
 | `--seed` | `42` | Seed global de reprodutibilidade. |
-| `--tf-device` | `auto` | Runtime TensorFlow: `auto`, `cpu` (forca CPU) ou `gpu` (exige GPU). |
+| `--tf-device` | `auto` | Runtime TensorFlow: `auto`, `cpu` (força CPU) ou `gpu` (exige GPU). |
 | `--verbose` | `False` | Ativa logs em nível debug. |
 
 ## Runtime TensorFlow (CPU/GPU)
 O pipeline aceita seleção explícita de dispositivo com `--tf-device`:
 - `auto` (default): usa GPU se detectada, senão CPU.
-- `cpu`: força CPU (modo recomendado para auditoria forense).
-- `gpu`: exige GPU visível; falha de forma explícita se não houver GPU.
+- `cpu`: força CPU.
+- `gpu`: exige GPU visível; falha se não houver GPU.
 
 Exemplos:
 ```bash
@@ -128,22 +322,22 @@ python -m src.pipeline.inference --models-dir outputs/<run_id>/models_saved --in
 ```
 
 ## Guia Operacional por Modalidade (passo a passo)
-Esta seção consolida o procedimento de execução ponta a ponta em ambiente local: treinamento, validação de artefatos e inferência.
+Esta seção consolida o procedimento ponta a ponta em ambiente local: treinamento, validação de artefatos e inferência.
 
 ### Pré-condição única (todas as modalidades)
-Mantenha o arquivo de entrada no caminho oficial `data/input/amostra_ssp.csv`.
-Para treinamento local da SSP-DF, recomenda-se substituir apenas o conteúdo do arquivo, preservando o mesmo nome para manter compatibilidade operacional.
+Mantenha o arquivo de entrada no caminho oficial `data/input/amostra_ssp.csv`.  
+Para treinamento local da SSP-DF, recomenda-se substituir apenas o conteúdo do arquivo, preservando o mesmo nome.
 
 ### 1) Treino completo e o que observar no log
-Durante o treinamento completo, o log deve registrar, em sequência:
+Durante o treinamento completo, o log deve registrar:
 1. `ETAPA 1`: carga, schema e split temporal.
 2. `ETAPA 2`: features por família e gravação de `gru_scaler.joblib`.
-3. `ETAPA 3`: treino ISO/HBOS com thresholds `p90/p95/p99`.
+3. `ETAPA 3`: treino ISO/HBOS com thresholds dos percentis configurados em `parametros.percentis_teste`.
 4. `ETAPA 4`: treino temporal `Union/Inter/Baseline`.
 5. `ETAPA 5`: exportação final, manifesto, parquet e relatório HTML.
 
 Indicadores de execução válida:
-- `THRESHOLDS SERIALIZADOS: [90, 95, 99]`
+- `THRESHOLDS SERIALIZADOS: ...`
 - `Manifesto de modelos salvo`
 - `Relatorio HTML gerado`
 - `EXPERIMENTO FINALIZADO`
@@ -173,16 +367,17 @@ python -m src.main --input data/input/amostra_ssp.csv --epochs 50 --seed 42 --ou
 ```
 
 ### 3) Análise de execução dos modelos (como interpretar)
-Após a execução, realize a análise técnico-operacional com base em `outputs/<run_id>/metrics/execution.log`:
-- **ISO/HBOS**: confirmar calibração de thresholds no treino e aplicação no conjunto consolidado.
-- **Temporal (GRU)**: cobertura temporal abaixo de 100% pode ocorrer quando não há sequência válida por veículo.
-- **Ensemble final**: validar a seção `CAMADA DE DECISAO FINAL DO ENSEMBLE` e a taxa final de alertas.
-- **Seleção de configuração**: analisar `model_selection_val.csv` para estabilidade entre treino e validação.
+Após a execução, analise `outputs/<run_id>/metrics/execution.log`:
+- **ISO/HBOS**: calibração de thresholds no treino e aplicação no conjunto consolidado;
+- **Temporal (GRU)**: cobertura temporal pode ficar abaixo de 100% quando não há sequência válida por veículo;
+- **Ensemble final**: seção de decisão final e taxa de alertas;
+- **Seleção de configuração**: `model_selection_val.csv`.
 
 Artefatos prioritários para auditoria:
 - `outputs/<run_id>/master_table/resultado_final.parquet`
 - `outputs/<run_id>/models_saved/models_manifest.json`
-- `outputs/<run_id>/models_saved/thresholds_p95.json`
+- `outputs/<run_id>/models_saved/thresholds_p<percentil_operacional>.json`
+- `outputs/<run_id>/models_saved/feature_schema.json`
 - `outputs/<run_id>/relatorio_executivo.html`
 - `outputs/<run_id>/metrics/run_summary.json`
 
@@ -213,26 +408,25 @@ python -m src.pipeline.inference --models-dir outputs\<run_id>\models_saved --in
 ```
 
 ## Guia de Hiperparâmetros
-O pipeline foi desenhado para que a maior parte dos ajustes operacionais seja feita no YAML (`config_mapeamento.yaml`), e não diretamente no código. O parâmetro mais sensível no uso diário tende a ser `epochs`, mas sua alteração deve considerar conjuntamente janela temporal, volume de dados por veículo e cobertura de sequências válidas.
+O pipeline foi desenhado para que a maior parte dos ajustes operacionais seja feita em YAML, e não diretamente no código.
 
-### Como `--epochs` funciona na pratica
-- Se `--epochs` for informado na CLI, ele tem precedência sobre o YAML.
-- Se `--epochs` não for informado, o pipeline usa `parametros.temporal.epochs` do arquivo de configuração.
-- No estado atual do projeto, o valor operacional padrão no YAML é `5`.
+### Estrutura real de configuração
+Configurações no repositório:
+- `config_mapeamento.yaml` (raiz): configuração principal de execução (`--config`), com mapeamento de colunas, parâmetros de split, percentis e parâmetros de treino.
+- `config_mapeamento_epochs_test.yaml` (raiz): variação para cenários de teste/experimento.
+- `config/feature_config.py`: contrato de features por família/modelo (`get_features_for_model`) e configurações de features para ISO/HBOS/GRU/LSTM.
+- No diretório `config/`, o arquivo de configuração funcional é `feature_config.py` (não há YAML operacional adicional nesse diretório no estado atual).
 
-Exemplos reais:
-```bash
-python -m src.main --epochs 1
-python -m src.main --epochs 10 --seed 42
-python -m src.main --config config_mapeamento.yaml
-```
+Diferença prática:
+- os YAMLs controlam **parâmetros da run**;
+- `config/feature_config.py` controla **seleção de features por família** e o contrato base de colunas para cada tipo de modelo.
 
-Leitura técnico-operacional:
-- `epochs=1`: smoke test e validação rápida de fluxo/artefatos.
-- `epochs=5`: baseline atual do projeto, com equilíbrio entre custo computacional e estabilidade.
-- `epochs>5`: recomendado quando há maior volume de dados e cobertura temporal suficiente; aumenta tempo de processamento e pode elevar risco de overfitting em bases pequenas.
+### Como `--epochs` funciona na prática
+- Se `--epochs` for informado na CLI, tem precedência sobre o YAML.
+- Se `--epochs` não for informado, usa `parametros.temporal.epochs`.
+- No estado atual do projeto, o valor padrão no YAML principal é `5`.
 
-### Parâmetros centrais do YAML
+### Parâmetros centrais do YAML principal
 Valores atuais em `config_mapeamento.yaml`:
 - `parametros.split_ratios`: `train=0.6`, `validation=0.2`, `test=0.2`
 - `parametros.percentis_teste`: `[90, 95, 99]`
@@ -244,42 +438,43 @@ Valores atuais em `config_mapeamento.yaml`:
 - `parametros.temporal.batch_size`: `64`
 - `parametros.temporal.dropout`: `0.2`
 - `configuracoes_gerais.gap_segmentation_seconds`: `1800`
+- `configuracoes_gerais.report_required`: `true` (se ausente, default é `true`)
 
-### O que cada parametro muda
+Percentil operacional da decisão final:
+- o pipeline normaliza `parametros.percentis_teste` e prioriza `p95` quando `95` está na lista;
+- se `95` não estiver presente, usa o primeiro percentil válido;
+- o percentil operacional é propagado para treino, seleção, `run_summary`, tracking e relatório.
+
+Campo legado:
+- `n_alerts_p95` é mantido para compatibilidade e só recebe valor quando `operational_percentile == 95`.
+
+### O que cada parâmetro muda
 | Parâmetro | Efeito principal | Quando ajustar |
 |---|---|---|
-| `epochs` | Número de passagens de treino do modelo temporal | Ajuste fino de convergência do GRU |
-| `window_size` | Tamanho da sequência temporal | Quando o padrão anômalo depende de janelas mais curtas ou mais longas |
-| `gap_segmentation_seconds` | Quebra sequências com gaps longos | Quando a frequência de GPS muda entre ambientes |
-| `n_estimators` (ISO) | Robustez e custo computacional do Isolation Forest | Quando quiser comparar estabilidade de variantes ISO |
-| `n_bins` (HBOS) | Granularidade dos histogramas do HBOS | Quando quiser comparar sensibilidade local do HBOS |
-| `percentis_teste` | Thresholds operacionais de alerta | Quando precisar calibrar severidade de triagem |
-| `seed` | Reprodutibilidade da execução | Deve permanecer fixo em produção para auditoria |
+| `epochs` | Número de passagens de treino temporal | Ajuste fino de convergência |
+| `window_size` | Tamanho da sequência temporal | Padrões curtos vs longos |
+| `gap_segmentation_seconds` | Quebra de sequência por gap | Frequência de GPS variável |
+| `n_estimators` (ISO) | Robustez/custo do ISO | Comparar variantes |
+| `n_bins` (HBOS) | Granularidade HBOS | Sensibilidade local |
+| `percentis_teste` | Severidade de alerta | Calibração operacional |
+| `seed` | Reprodutibilidade | Auditoria |
 
 ### Recomendações de uso
-- Para validar instalação, CI local ou estrutura de outputs: usar `--epochs 1`.
-- Para treino operacional reprodutível: manter `--seed 42` e registrar sempre o `run_id`.
-- Para comparar configurações: alterar um grupo de parâmetros por vez e comparar `runs_index.csv`, `model_selection_val.csv` e `models_manifest.json`.
-- Para bases pequenas ou com baixa cobertura temporal: não aumentar `epochs` antes de verificar quantas sequências válidas o GRU conseguiu formar.
+- `--epochs 1`: smoke test e validação rápida.
+- `--seed 42`: manter fixo para rastreabilidade.
+- comparar configurações alterando um grupo por vez.
 
 ### O que observar no log
-Durante o treino, os logs relevantes para diagnóstico são:
-- `--epochs nao informado. Usando valor do YAML: ...`
-- `--epochs=<N> (explicito via CLI). Valor do YAML (...) ignorado.`
-- `Sequencias criadas: ...`
-- `Sequencias de treino STRICT (todos elementos no treino): ...`
-- `Thresholds calibrados no TREINO para ...`
-
-Essas mensagens apoiam, em auditoria, três perguntas centrais:
-- qual configuração efetivamente foi utilizada;
-- quanto dado temporal foi efetivamente treinável;
-- em qual distribuição os thresholds foram calibrados.
+- `--epochs nao informado...`
+- `--epochs=<N> (explicito via CLI)...`
+- `Sequencias criadas...`
+- `Thresholds calibrados no TREINO...`
 
 ## Outputs Gerados
 Estrutura por execução:
 ```text
 outputs/<run_id>/
-  models_saved/             # modelos, scalers, thresholds, manifesto
+  models_saved/             # modelos, scalers, thresholds, schema, manifesto
   metrics/                  # métricas e logs
   master_table/             # resultado_final.parquet
   relatorio_executivo.html
@@ -289,18 +484,13 @@ outputs/runs_index.csv      # índice de execuções
 Artefatos principais:
 | Arquivo | Local | Função |
 |---|---|---|
-| `resultado_final.parquet` | `outputs/<run_id>/master_table/` | Tabela consolidada com scores, labels e decisão final. |
-| `models_manifest.json` | `outputs/<run_id>/models_saved/` | Inventário de artefatos com SHA256 e metadados git/run. |
-| `thresholds_p90.json`, `thresholds_p95.json`, `thresholds_p99.json` | `outputs/<run_id>/models_saved/` | Thresholds serializados para inferência. |
-| `perfil_dados.json` | `outputs/<run_id>/metrics/` | Perfil e metadados da execução. |
-| `concordancia_modelos.csv` | `outputs/<run_id>/metrics/` | Concordância entre labels dos modelos. |
-| `run_summary.json` | `outputs/<run_id>/metrics/` | Resumo estruturado da run. |
-| `execution.log` | `outputs/<run_id>/metrics/` | Log textual da execução. |
-| `vehicle_risk_ranking.csv` | `outputs/<run_id>/metrics/` | Ranking de risco por veículo. |
-| `vehicle_coverage_report.csv` | `outputs/<run_id>/metrics/` | Cobertura de avaliação por veículo. |
-| `relatorio_executivo.html` | `outputs/<run_id>/` | Relatório visual consolidado para leitura executiva e auditoria. |
-
-Para apresentação institucional, o artefato prioritário é `outputs/<run_id>/relatorio_executivo.html`, pois consolida KPIs, ranking de veículos, concordância, cobertura e limitações metodológicas em um único documento.
+| `resultado_final.parquet` | `outputs/<run_id>/master_table/` | Tabela consolidada com scores, labels e decisão final |
+| `models_manifest.json` | `outputs/<run_id>/models_saved/` | Inventário de artefatos com SHA256 e metadados git/run |
+| `thresholds_p<percentil>.json` | `outputs/<run_id>/models_saved/` | Thresholds serializados por percentil |
+| `feature_schema.json` | `outputs/<run_id>/models_saved/` | Schema canônico de features do treino |
+| `run_summary.json` | `outputs/<run_id>/metrics/` | Resumo estruturado da run |
+| `execution.log` | `outputs/<run_id>/metrics/` | Log textual da execução |
+| `relatorio_executivo.html` | `outputs/<run_id>/` | Relatório visual consolidado |
 
 ## Inferência em Dados Novos
 Comando real (`src/pipeline/inference.py`):
@@ -316,48 +506,27 @@ Parâmetros úteis:
 - `--percentile` (default `95`)
 - `--config` (default `config_mapeamento.yaml`)
 - `--tf-device` (`auto`, `cpu`, `gpu`)
-- `--allow-legacy-manifest` (permite manifesto sem SHA256)
+- `--allow-legacy-manifest`
 
 Modos de operação:
-- Modo normal: thresholds (`thresholds_p<percentil>.json`) carregados do treino.
-- Modo degradado: thresholds ausentes -> recalibra nos dados novos com warning (não lança exceção).
-- Modo compatibilidade: se `models_manifest.json` estiver ausente, a inferência tenta descobrir `iso_*.joblib`, `hbos_*.joblib`, `temporal_*.h5` e scalers diretamente por nome de arquivo.
-
-Temporal na inferência:
-- Se `gru_scaler.joblib` ausente, a família temporal é pulada com warning.
-- A inferência continua com ISO/HBOS (sem abortar).
+- normal: usa thresholds do treino;
+- degradado: thresholds ausentes, recalibra no lote novo (warning);
+- compatibilidade: sem manifesto, tenta descobrir artefatos por convenção de nome.
 
 ## Relatório HTML Executivo
-Ao final do treinamento, o pipeline tenta gerar automaticamente:
-
+Ao final do treinamento, o pipeline tenta gerar:
 ```text
 outputs/<run_id>/relatorio_executivo.html
 ```
 
-Como abrir:
-- navegador local (Chrome, Edge ou equivalente);
-- sem depender de notebook, planilha ou ferramenta externa para leitura inicial.
-
-O que o relatório contém:
-- KPIs consolidados da run;
-- total de alertas e taxa de alerta;
-- ranking de risco por veículo;
-- cobertura de avaliação, incluindo cobertura temporal;
-- distribuições de score por família de modelo;
-- matriz de concordância entre modelos;
-- seção metodológica com disclaimers explícitos;
-- referência ao `run_id` da execução.
-
-Como interpretar corretamente:
-- `ensemble_alert = 1` significa que o registro foi considerado anômalo pelo ensemble configurado; nao significa confirmação de irregularidade.
-- ausência de alerta nao equivale a normalidade comprovada.
-- cobertura temporal inferior a 100% significa que parte dos registros nao formou sequência suficiente para o GRU.
-- concordância entre modelos mede consistência interna, nao performance supervisionada.
-
-Limitação interpretativa:
-- o relatório é um artefato de triagem analítica e apoio à decisão;
-- ele não substitui validação supervisionada, anotação humana ou confirmação operacional em campo;
-- sem ground truth rotulado, os gráficos e métricas devem ser lidos como evidência estatística e de rastreabilidade, não como prova de acurácia final.
+Conteúdo:
+- KPIs;
+- taxa de alerta;
+- ranking por veículo;
+- cobertura temporal;
+- distribuições de score;
+- concordância;
+- metodologia e disclaimers.
 
 ## Contrato de Artefatos
 Obrigatórios no fluxo oficial de inferência rastreável:
@@ -365,26 +534,21 @@ Obrigatórios no fluxo oficial de inferência rastreável:
 - `scaler.joblib`
 - `iso_*.joblib`
 - `hbos_*.joblib`
-- `thresholds_p95.json`
+- `thresholds_p<percentil_operacional>.json`
 
-Condicionais (família temporal):
+Condicionais (temporal):
 - `gru_scaler.joblib`
 - `temporal_*.h5`
 
-Operacionais (pós-processamento e auditoria):
+Operacionais (auditoria):
 - `concordancia_modelos.csv`
 - `vehicle_risk_ranking.csv`
 - `run_summary.json`
 
-Compatibilidade e fallback ainda aceitos pelo código:
-- ausência de `models_manifest.json`: descoberta dos artefatos por convenção de nome.
-- ausência de `thresholds_p95.json`: recalibração nos dados novos (modo degradado, não recomendado para produção).
-- ausência de `gru_scaler.joblib`: inferência segue apenas com ISO/HBOS.
-
 ## Schema de Entrada
 Validação implementada em `src/data/schema.py` (Pandera).
 
-Colunas mínimas esperadas (após mapeamento):
+Colunas mínimas:
 - `placa`
 - `timestamp`
 - `latitude`
@@ -394,11 +558,7 @@ Regras principais:
 - `latitude` em `[-16.5, -15.0]`
 - `longitude` em `[-48.5, -47.0]`
 - `timestamp` entre `2020-01-01` e `2030-12-31`
-- Dataset com pelo menos 1 registro (suporta micro-batch)
-
-Formatos de entrada suportados:
-- `.csv`
-- `.parquet`
+- suporta micro-batch (>= 1 registro)
 
 ## Reprodutibilidade
 Com `--seed 42`, o pipeline fixa:
@@ -409,11 +569,7 @@ Com `--seed 42`, o pipeline fixa:
 - `tf.random.set_seed(...)`
 
 Limitação prática:
-- Em GPU, operações podem não ser bit-perfect entre execuções.
-
-Modos operacionais recomendados:
-- `cpu-audit`: usar `--tf-device cpu` para reprodução forense.
-- `gpu-train`: usar `--tf-device gpu` para treino exploratório/volumoso.
+- em GPU, determinismo bit-a-bit pode variar.
 
 ## Rastreabilidade
 A rastreabilidade da run é registrada em:
@@ -421,100 +577,212 @@ A rastreabilidade da run é registrada em:
 - `outputs/<run_id>/metrics/run_summary.json`
 - `outputs/<run_id>/models_saved/models_manifest.json`
 
-`models_manifest.json` inclui:
-- `model_version`
-- hashes SHA256 dos artefatos
-- metadados git (`commit_hash`, branch, dirty flag, timestamp)
+### Semântica de status e run_summary.json
+O arquivo `run_summary.json` (em `outputs/<run_id>/metrics/`) é a fonte oficial do estado final da run.
 
-Se o treino ocorrer com working tree sujo (`is_dirty=true`), o pipeline gera warning explícito.
+Campos principais:
+- `status`
+- `failed_stage`
+- `error_message`
+- `report_status`
+- `report_error`
+- `parameters.operational_percentile`
+
+Regra operacional:
+- `status=FAILED` cobre tanto erro técnico quanto interrupção manual (`KeyboardInterrupt`), por consistência de auditoria.
 
 ## Testes
-Executar suíte:
+Esta suíte possui **24 arquivos de teste** (`tests/test_*.py`).
+
+### Comando exato para testes herméticos / CI-safe
+Use este comando para validação sem depender de run prévia em `outputs/`:
+```bash
+pytest -v \
+  tests/test_artifact_integrity.py \
+  tests/test_ensemble_decision.py \
+  tests/test_evaluation.py \
+  tests/test_experiment_percentile_resolution.py \
+  tests/test_feature_config_unit.py \
+  tests/test_git_utils.py \
+  tests/test_inference_feature_alignment.py \
+  tests/test_logger_utils_unit.py \
+  tests/test_model_selection.py \
+  tests/test_models_base.py \
+  tests/test_models_deep.py \
+  tests/test_regression_c1_c2.py \
+  tests/test_report_generator_unit.py \
+  tests/test_reproducibility_runtime.py \
+  tests/test_run_experiment_robustness.py \
+  tests/test_schema.py \
+  tests/test_tf_runtime_unit.py \
+  tests/test_tracking_unit.py
+```
+
+Tempo esperado (hermético/CI-safe): `[ESTIMAR]`.
+
+### Sequência para suíte completa após uma run de treino
+1. Gerar uma run recente em `outputs/`:
+```bash
+python -m src.main --input data/input/amostra_ssp.csv --epochs 1 --seed 42 --tf-device cpu --output-dir outputs
+```
+2. Rodar a suíte completa:
 ```bash
 pytest tests/ -v
 ```
+3. (Opcional) forçar estabilidade em CPU de forma explícita:
+```bash
+STABILITY_TF_DEVICE=cpu pytest tests/test_stability.py -v
+```
+PowerShell:
+```powershell
+$env:STABILITY_TF_DEVICE="cpu"
+pytest tests/test_stability.py -v
+```
 
-Testes herméticos (sem depender de run prévia):
-- `tests/test_regression_c1_c2.py`
-- `tests/test_schema.py`
-- `tests/test_git_utils.py`
-- `tests/test_artifact_integrity.py`
-- `tests/test_data_processor.py`
-- `tests/test_ensemble_decision.py`
-- `tests/test_evaluation.py`
-- `tests/test_model_selection.py`
-- `tests/test_models_base.py`
+Tempo esperado (suíte completa): `[ESTIMAR]`.  
+Tempo esperado (somente estabilidade): `[ESTIMAR]`.
 
-Testes que dependem de artefatos de run prévia:
-- `tests/test_integration_train_infer.py`
-- `tests/test_stability.py`
-- `tests/test_pipeline_flow.py`
-- `tests/test_outputs_generated.py`
-- `tests/test_manifest_portability.py`
-- `tests/test_threshold_serialization.py`
-- `tests/test_report_smoke.py`
+### Grupos funcionais (24 testes)
+1. **Integridade e utilitários de infraestrutura**  
+Valida hash/manifesto, runtime, tracking, logging e contratos básicos de configuração.  
+Arquivos: `test_artifact_integrity.py`, `test_feature_config_unit.py`, `test_git_utils.py`, `test_logger_utils_unit.py`, `test_tf_runtime_unit.py`, `test_tracking_unit.py`.
 
-Testes específicos e opcionais:
-- `tests/test_models_deep.py`: cobre o `TemporalAutoencoder` e fluxo mínimo da família temporal.
-- `tests/test_inference.py` e `tests/test_inference_smoke.py`: validam a inferência real e seus fallbacks.
-- `tests/test_epoch_selection.py`: teste lento, voltado a exploração de épocas; não deve ser tratado como contrato mínimo de CI.
+2. **Semântica de decisão e schema de entrada**  
+Valida schema mínimo, métricas, ensemble e regras semânticas críticas (NaN, Union/Inter, subconjunto).  
+Arquivos: `test_schema.py`, `test_evaluation.py`, `test_ensemble_decision.py`, `test_model_selection.py`, `test_regression_c1_c2.py`.
+
+3. **Modelos e contratos de treino/inferência (herméticos com monkeypatch/sintético)**  
+Valida modelos base/deep, percentil operacional, schema canônico de features e robustez de falha/reprodutibilidade do `run_experiment()`.  
+Arquivos: `test_models_base.py`, `test_models_deep.py`, `test_experiment_percentile_resolution.py`, `test_inference_feature_alignment.py`, `test_reproducibility_runtime.py`, `test_run_experiment_robustness.py`, `test_report_generator_unit.py`.
+
+4. **Processamento de dados com amostra local**  
+Valida carga/padronização e feature engineering usando `data/input/amostra_ssp.csv` (com skip controlado se ausente).  
+Arquivos: `test_data_processor.py`.
+
+5. **Integração com artefatos de run treinada**  
+Valida contrato fim-a-fim de artefatos (`models_manifest.json`, thresholds, relatório) e inferência com `models_saved` da run mais recente.  
+Arquivos: `test_integration_train_infer.py`, `test_inference.py`, `test_output_artifacts.py`.
+
+6. **Estabilidade determinística**  
+Executa duas runs com mesmo seed e compara consistência de `ensemble_alert`, scores ISO e thresholds (CPU estrito).  
+Arquivos: `test_stability.py`.
+
+7. **Varredura opcional de épocas (teste lento/manual)**  
+Executa sweep de epochs somente quando `RUN_EPOCH_SWEEP=1`.  
+Arquivos: `test_epoch_selection.py`.
+
+### Como interpretar falhas (o que investigar primeiro)
+1. Falhas em **Integridade e utilitários**  
+Investigar primeiro: `src/utils/artifact_utils.py`, `src/utils/tf_runtime.py`, `src/utils/tracking.py`, `src/utils/logger_utils.py`.
+
+2. Falhas em **Semântica de decisão e schema**  
+Investigar primeiro: `src/utils/evaluation.py`, `src/utils/ensemble_decision.py`, `src/data/schema.py`, `src/utils/model_selection.py`.
+
+3. Falhas em **Modelos/contratos herméticos**  
+Investigar primeiro: `src/pipeline/experiment_runner.py`, `src/pipeline/inference.py`, `src/models/temporal_autoencoder.py`, `src/outputs/report_generator.py`.
+
+4. Falhas em **Processamento de dados com amostra local**  
+Investigar primeiro: presença/qualidade de `data/input/amostra_ssp.csv` e mapeamento em `config_mapeamento.yaml`.
+
+5. Falhas em **Integração pós-treino**  
+Investigar primeiro: se existe run recente em `outputs/<run_id>/`, incluindo `models_saved/`, `thresholds_p*.json`, `models_manifest.json` e `run_summary.json`.
+
+6. Falhas em **Estabilidade**  
+Investigar primeiro: execução em CPU (`STABILITY_TF_DEVICE=cpu`), seed (`42`) e mudanças em setup determinístico (`src/utils/tf_runtime.py` / `run_experiment()`).
+
+7. Falhas em **Epoch sweep**  
+Investigar primeiro: variáveis `RUN_EPOCH_SWEEP`, `EPOCH_SWEEP_VALUES`, dataset com volume suficiente e custo computacional disponível.
+
+Observações operacionais:
+- **CI-safe**: grupos 1, 2 e 3 (comando hermético acima).
+- **Dependem de dado local**: grupo 4.
+- **Dependem de run prévia em `outputs/`**: grupo 5.
+- **Mais custosos**: grupos 6 e 7.
 
 ## Docker
-Build:
+### Build da imagem CPU
 ```bash
 docker build -t sspdf-anomalias .
 ```
 
-Build GPU (NVIDIA):
+### Build da imagem GPU
 ```bash
 docker build -f Dockerfile.gpu -t sspdf-anomalias-gpu .
 ```
 
-Execução (treino) com `docker run`:
+### Execução de treino via `docker run` (CPU)
 ```bash
 docker run --rm \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/outputs:/app/outputs \
   sspdf-anomalias \
-  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
+  python -m src.main \
+    --config /app/config_mapeamento.yaml \
+    --input /app/data/input/amostra_ssp.csv \
+    --output-dir /app/outputs \
+    --tf-device cpu
 ```
 
-PowerShell equivalente:
+### Execução de inferência via `docker run` (CPU)
+```bash
+docker run --rm \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/outputs:/app/outputs \
+  sspdf-anomalias \
+  python -m src.pipeline.inference \
+    --models-dir /app/outputs/<RUN_ID>/models_saved \
+    --config /app/config_mapeamento.yaml \
+    --input /app/data/input/amostra_ssp.csv \
+    --output /app/outputs/inference_output \
+    --tf-device cpu
+```
+
+### PowerShell (CPU)
 ```powershell
 docker run --rm `
   -v "${PWD}\data:/app/data" `
   -v "${PWD}\outputs:/app/outputs" `
   sspdf-anomalias `
-  python -m src.main --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
+  python -m src.main `
+    --config /app/config_mapeamento.yaml `
+    --input /app/data/input/amostra_ssp.csv `
+    --output-dir /app/outputs `
+    --tf-device cpu
 ```
 
-`docker compose` (treino e inferência):
+### Execução com `docker compose` (CPU)
+Pré-requisito:
+1. Copiar `.env.example` para `.env`.
+2. Ajustar pelo menos `RUN_ID` antes da inferência.
+
 ```bash
-docker compose run --rm train --input /app/data/input/amostra_ssp.csv --epochs 50 --seed 42 --tf-device auto --output-dir /app/outputs/docker_train
-docker compose run --rm infer --tf-device auto
+docker compose run --rm train
+docker compose run --rm infer
 ```
 
-`docker compose` com GPU (NVIDIA Container Toolkit):
+Contrato dos serviços CPU no compose:
+- `train`: executa `python -m src.main` com `--tf-device cpu`, `--config /app/config_mapeamento.yaml` e entrada em `/app/data/input/${INPUT_FILE}`.
+- `infer`: executa `python -m src.pipeline.inference` com `--tf-device cpu` e `--models-dir /app/outputs/${RUN_ID}/models_saved`.
+
+### Execução com `docker compose` (GPU)
 ```bash
 docker compose --profile gpu run --rm train-gpu
 docker compose --profile gpu run --rm infer-gpu
 ```
 
-Pré-requisitos do host para GPU:
-- Driver NVIDIA instalado e `nvidia-smi` funcional no host.
-- Docker com NVIDIA Container Toolkit instalado.
-- Validação recomendada:
-```bash
-docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
-docker compose --profile gpu run --rm train-gpu python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
-```
+Contrato dos serviços GPU no compose:
+- `train-gpu`: executa `python -m src.main` com `--tf-device ${TF_DEVICE:-gpu}`.
+- `infer-gpu`: executa `python -m src.pipeline.inference` com `--tf-device ${TF_DEVICE:-gpu}`.
 
-Se quiser fixar variáveis do serviço `infer`, copie `.env.example` para `.env` e ajuste:
-- `RUN_ID`
-- `INPUT_FILE`
-- `INFER_OUTPUT_DIR`
-- `TF_DEVICE`
+### Pré-requisitos de GPU
+- driver NVIDIA no host;
+- NVIDIA Container Toolkit;
+- validação com `nvidia-smi`.
+
+### Limitações operacionais do contrato Docker
+- inferência requer `RUN_ID` válido de uma run previamente treinada em `outputs/<RUN_ID>/models_saved`.
+- com volumes bind (`./data`, `./outputs`), permissões de escrita no host devem aceitar o UID/GID do processo no container (usuário `sspdf`, UID 1000).
 
 ## Limitações Conhecidas
 - Em GPU, determinismo bit-a-bit não é garantido para todas as operações.
-- O sistema é não supervisionado: sem ground truth rotulado, as métricas operacionais são de consistência/concordância, não de performance supervisionada (precision/recall/F1 reais).
+- Sem ground truth rotulado, métricas são de consistência/concordância, não de performance supervisionada real.

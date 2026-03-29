@@ -7,21 +7,30 @@ ENV PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
     TF_CPP_MIN_LOG_LEVEL=2
 
+# Toolchain pinada para builds mais reprodutiveis
+ARG PIP_VERSION=24.3.1
+ARG SETUPTOOLS_VERSION=75.6.0
+ARG WHEEL_VERSION=0.45.1
+
 # Dependencias do perfil GPU (TensorFlow 2.12.x + stack do projeto)
 COPY requirements-gpu.txt .
-RUN pip install --upgrade pip && \
-    pip install -r requirements-gpu.txt
+RUN python -m pip install --upgrade \
+    pip==${PIP_VERSION} \
+    setuptools==${SETUPTOOLS_VERSION} \
+    wheel==${WHEEL_VERSION} && \
+    python -m pip install -r requirements-gpu.txt
 
 # Usuario nao-root para execucao
 RUN useradd -m -u 1000 sspdf
 
-# Codigo-fonte
-COPY config_mapeamento.yaml .
+# Codigo-fonte e YAMLs de configuracao da raiz
+COPY config_mapeamento*.yaml ./
 COPY src/ src/
 COPY config/ config/
 
-RUN mkdir -p data/input
+RUN mkdir -p /app/data/input /app/outputs && \
+    chown -R sspdf:sspdf /app
 
 USER sspdf
-HEALTHCHECK --interval=60s --timeout=10s --retries=3 CMD python -c "import src.main" || exit 1
+HEALTHCHECK --interval=90s --timeout=5s --retries=3 CMD python -c "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('src.main') else 1)"
 CMD ["python", "-m", "src.main", "--tf-device", "auto"]

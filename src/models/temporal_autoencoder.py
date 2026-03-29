@@ -7,10 +7,16 @@ import logging
 
 import numpy as np
 import pandas as pd
-from tensorflow import keras
 from src.utils.logger_utils import log_execution
 
 logger = logging.getLogger("sspdf")
+
+
+def _get_keras():
+    """Import tardio de TensorFlow/Keras para respeitar setup de runtime."""
+    import tensorflow as tf
+
+    return tf.keras
 
 
 class TemporalAutoencoder:
@@ -69,11 +75,16 @@ class TemporalAutoencoder:
             default_config.update(arch_config)
         self.arch_config = default_config
         self.model = None
+        self._keras = _get_keras()
         self._cached_sequences = None
         self._cached_last_indices = None
         self._cached_first_indices = None
 
-        self._LayerClass = keras.layers.GRU if arch_type == "gru" else keras.layers.LSTM
+        self._LayerClass = (
+            self._keras.layers.GRU
+            if arch_type == "gru"
+            else self._keras.layers.LSTM
+        )
         layer_name = arch_type.upper()
 
         logger.info("=" * 60)
@@ -158,6 +169,7 @@ class TemporalAutoencoder:
 
     def _build_model(self, n_features):
         """Constrói o autoencoder com a arquitetura configurável."""
+        keras = self._keras
         layer = self._LayerClass
         arch = self.arch_type.upper()
         cfg = self.arch_config
@@ -259,7 +271,7 @@ class TemporalAutoencoder:
         n_features = self.X.shape[1]
         self.model = self._build_model(n_features)
 
-        es = keras.callbacks.EarlyStopping(
+        es = self._keras.callbacks.EarlyStopping(
             monitor="loss", patience=3, mode="min", restore_best_weights=True
         )
         logger.info(

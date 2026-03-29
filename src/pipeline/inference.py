@@ -33,6 +33,7 @@ from src.utils.artifact_utils import verify_artifact_strict
 from src.utils.tf_runtime import configure_tensorflow_runtime
 
 logger = logging.getLogger("sspdf")
+FEATURE_SCHEMA_FILENAME = "feature_schema.json"
 
 
 def _canonical_temporal_name_from_file(fname):
@@ -134,8 +135,168 @@ def load_models_manifest(models_dir):
         scaler_info = manifest.get(scaler_key, {})
         if isinstance(scaler_info, dict):
             integrity_fields.append(scaler_info.get("sha256"))
+    for threshold_info in manifest.get("thresholds", {}).values():
+        if isinstance(threshold_info, dict):
+            integrity_fields.append(threshold_info.get("sha256"))
+    feature_schema_info = manifest.get("feature_schema", {})
+    if isinstance(feature_schema_info, dict):
+        integrity_fields.append(feature_schema_info.get("sha256"))
     manifest["_integrity_available"] = any(integrity_fields)
     return manifest
+
+
+def _load_feature_schema(models_dir, manifest=None, strict_integrity=True):
+    """
+    Carrega schema de features do treino quando disponivel.
+    """
+    schema_info = None
+    schema_path = os.path.join(models_dir, FEATURE_SCHEMA_FILENAME)
+
+    if isinstance(manifest, dict):
+        raw_schema_info = manifest.get("feature_schema")
+        if isinstance(raw_schema_info, dict):
+            schema_info = raw_schema_info
+            if schema_info.get("path"):
+                schema_path = _resolve_path(models_dir, schema_info["path"])
+        elif raw_schema_info is not None:
+            if strict_integrity:
+                raise ValueError(
+                    "Manifesto invalido para feature_schema.json: entrada nao e objeto."
+                )
+            logger.warning(
+                "Manifesto invalido para feature_schema.json: entrada nao e objeto. "
+                "Usando fallback permissivo para schema local."
+            )
+
+    if not os.path.exists(schema_path):
+        return {}
+
+    expected_hash = None
+    if isinstance(schema_info, dict):
+        expected_hash = schema_info.get("sha256")
+
+    if strict_integrity:
+        if not isinstance(schema_info, dict):
+            raise ValueError(
+                "Manifesto invalido para feature_schema.json: metadados ausentes em modo estrito."
+            )
+        if not expected_hash:
+            raise ValueError(
+                "Manifesto invalido para feature_schema.json: campo sha256 ausente."
+            )
+        verify_artifact_strict(schema_path, expected_hash, FEATURE_SCHEMA_FILENAME)
+    else:
+        if expected_hash:
+            verify_artifact_strict(schema_path, expected_hash, FEATURE_SCHEMA_FILENAME)
+        else:
+            logger.warning(
+                "Integridade nao verificavel para feature_schema.json em modo permissivo: "
+                "campo sha256 ausente no manifesto."
+            )
+
+    with open(schema_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        if strict_integrity:
+            raise ValueError("feature_schema.json invalido (nao e objeto).")
+        logger.warning("feature_schema.json invalido (nao e objeto). Ignorando.")
+        return {}
+    return payload
+
+
+def _resolve_expected_main_features(feature_schema, scaler):
+    """
+    Resolve ordem de features do scaler principal.
+    Prioridade: feature_schema.json > scaler.feature_names_in_.
+    """
+    schema_features = feature_schema.get("main_scaler_features", [])
+    if isinstance(schema_features, list) and schema_features:
+        return list(schema_features)
+
+    scaler_features = getattr(scaler, "feature_names_in_", None)
+    if scaler_features is not None and len(scaler_features) > 0:
+        return list(scaler_features)
+
+    return []
+
+
+def _resolve_feature_list(
+    feature_schema,
+    key,
+    fallback,
+    context_label=None,
+    warn_on_fallback=False,
+):
+    expected = feature_schema.get(key, [])
+    if isinstance(expected, list) and expected:
+        return list(expected)
+    resolved = list(fallback)
+    if warn_on_fallback:
+        label = context_label or key
+        logger.warning(
+            f"{label}: usando fallback legado de features por ausencia de feature_schema.json."
+        )
+    return resolved
+
+
+def _align_df_with_expected_ra(df, expected_features, context_label):
+    """
+    Garante alinhamento de colunas RA_* com o schema do treino.
+    """
+    aligned = df.copy()
+    expected_set = set(expected_features)
+
+    missing = [col for col in expected_features if col not in aligned.columns]
+    missing_ra = [col for col in missing if col.startswith("RA_")]
+    missing_non_ra = [col for col in missing if not col.startswith("RA_")]
+
+    for col in missing_ra:
+        aligned[col] = 0
+
+    if missing_non_ra:
+        raise ValueError(
+            f"Features obrigatorias ausentes para {context_label}: {missing_non_ra}. "
+            "Nao e seguro inferir sem essas colunas."
+        )
+
+    extra_ra = [
+        col
+        for col in aligned.columns
+        if col.startswith("RA_") and col not in expected_set
+    ]
+    if extra_ra:
+        aligned = aligned.drop(columns=extra_ra, errors="ignore")
+        logger.warning(
+            f"{context_label}: ignorando {len(extra_ra)} RA_* nao vistas no treino: {extra_ra}"
+        )
+
+    if missing_ra:
+        logger.info(
+            f"{context_label}: adicionadas {len(missing_ra)} RA_* ausentes com 0: {missing_ra}"
+        )
+    return aligned
+
+
+def _build_feature_matrix(df, features, context_label):
+    missing = [col for col in features if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Features ausentes para {context_label}: {missing}. "
+            "Verifique aderencia entre treino e inferencia."
+        )
+    return df[features].values
+
+
+def _ensure_expected_features_present(df, expected_features, context_label):
+    """
+    Garante que o DataFrame manteve todas as colunas esperadas apos transformacoes.
+    """
+    missing = [col for col in expected_features if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Features esperadas ausentes apos {context_label}: {missing}. "
+            "Contrato treino->inferencia violado."
+        )
 
 
 def _ensure_artifact_integrity(
@@ -162,6 +323,10 @@ def _ensure_artifact_integrity(
     if strict_integrity:
         logger.warning(
             f"Integridade nao verificavel para {model_name}: campo sha256 ausente no manifesto."
+        )
+    else:
+        logger.warning(
+            f"Modo permissivo: carregando {model_name} sem verificacao de sha256."
         )
 
 
@@ -225,6 +390,18 @@ def _load_models_from_manifest(
     else:
         scaler_path = manifest.get("scalers", {}).get("main")
         if scaler_path and os.path.exists(scaler_path):
+            if require_hash:
+                raise ValueError(
+                    "Manifesto invalido para scaler.joblib: campo sha256 ausente."
+                )
+            if strict_integrity:
+                logger.warning(
+                    "Integridade nao verificavel para scaler.joblib em manifesto legado."
+                )
+            else:
+                logger.warning(
+                    "Modo permissivo: carregando scaler.joblib via caminho legado sem sha256."
+                )
             scaler = joblib.load(scaler_path)
 
     gru_scaler_info = manifest.get("gru_scaler")
@@ -239,22 +416,79 @@ def _load_models_from_manifest(
     else:
         gru_scaler_path = manifest.get("scalers", {}).get("gru")
         if gru_scaler_path and os.path.exists(gru_scaler_path):
+            if require_hash:
+                raise ValueError(
+                    "Manifesto invalido para gru_scaler.joblib: campo sha256 ausente."
+                )
+            if strict_integrity:
+                logger.warning(
+                    "Integridade nao verificavel para gru_scaler.joblib em manifesto legado."
+                )
+            else:
+                logger.warning(
+                    "Modo permissivo: carregando gru_scaler.joblib via caminho legado sem sha256."
+                )
             gru_scaler = joblib.load(gru_scaler_path)
 
     return iso_models, hbos_models, temporal_entries, scaler, gru_scaler
 
 
-def load_thresholds(models_dir, percentile=95, manifest=None):
+def load_thresholds(
+    models_dir,
+    percentile=95,
+    manifest=None,
+    strict_integrity=True,
+    require_hash=False,
+):
     """
     Carrega thresholds de producao salvos pelo treinamento.
     Se nao existir arquivo de thresholds, usa os percentis padrao dos scores.
     """
     manifest_thresh = None
+    effective_require_hash = bool(strict_integrity or require_hash)
     thresh_path = os.path.join(models_dir, f"thresholds_p{percentile}.json")
-    if manifest and isinstance(manifest.get("thresholds"), dict):
-        manifest_thresh = manifest["thresholds"].get(str(percentile))
-        if isinstance(manifest_thresh, dict) and manifest_thresh.get("path"):
-            thresh_path = _resolve_path(models_dir, manifest_thresh["path"])
+    thresholds_map = manifest.get("thresholds") if isinstance(manifest, dict) else None
+    if strict_integrity:
+        if not isinstance(thresholds_map, dict):
+            raise ValueError(
+                f"Manifesto invalido para thresholds_p{percentile}.json: bloco thresholds ausente."
+            )
+        manifest_thresh = thresholds_map.get(str(percentile))
+        if not isinstance(manifest_thresh, dict):
+            raise ValueError(
+                f"Manifesto invalido: percentil {percentile} ausente em thresholds."
+            )
+        if not manifest_thresh.get("path"):
+            raise ValueError(
+                f"Manifesto invalido para thresholds_p{percentile}.json: campo path ausente."
+            )
+        if not manifest_thresh.get("sha256"):
+            raise ValueError(
+                f"Manifesto invalido para thresholds_p{percentile}.json: campo sha256 ausente."
+            )
+        thresh_path = _resolve_path(models_dir, manifest_thresh["path"])
+    else:
+        if isinstance(thresholds_map, dict):
+            manifest_thresh = thresholds_map.get(str(percentile))
+            if isinstance(manifest_thresh, dict):
+                if manifest_thresh.get("path"):
+                    thresh_path = _resolve_path(models_dir, manifest_thresh["path"])
+                else:
+                    logger.warning(
+                        f"Manifesto sem path para thresholds_p{percentile}.json em modo permissivo."
+                    )
+            elif manifest_thresh is not None:
+                logger.warning(
+                    f"Manifesto invalido para thresholds_p{percentile}.json: entrada nao e objeto."
+                )
+            else:
+                logger.warning(
+                    f"Manifesto sem entrada para thresholds p{percentile}; tentando arquivo padrao (modo permissivo)."
+                )
+        elif manifest is not None:
+            logger.warning(
+                f"Manifesto sem bloco thresholds; tentando thresholds_p{percentile}.json local (modo permissivo)."
+            )
 
     if os.path.exists(thresh_path):
         with open(thresh_path, encoding="utf-8") as f:
@@ -271,15 +505,31 @@ def load_thresholds(models_dir, percentile=95, manifest=None):
                 logger.info(
                     f"Integridade de thresholds verificada: thresholds_p{percentile}.json"
                 )
+            elif effective_require_hash:
+                raise ValueError(
+                    f"Manifesto invalido para thresholds_p{percentile}.json: campo sha256 ausente."
+                )
             else:
                 logger.warning(
                     f"sha256 de thresholds nao disponivel para p{percentile} no manifesto."
                 )
+        elif effective_require_hash:
+            raise ValueError(
+                f"Manifesto invalido para thresholds_p{percentile}.json: metadados ausentes em modo estrito."
+            )
+        else:
+            logger.warning(
+                f"Thresholds p{percentile} carregados sem metadados de integridade (modo permissivo)."
+            )
         return thresholds
+    if strict_integrity:
+        raise FileNotFoundError(
+            f"thresholds_p{percentile}.json nao encontrado em modo estrito: {thresh_path}"
+        )
     logger.warning(
         f"thresholds_p{percentile}.json nao encontrado em {models_dir}. "
         "Os thresholds serao recalculados nos novos dados (modo degradado). "
-        "Para usar thresholds do treino, adicione geracao de thresholds_p95.json "
+        f"Para usar thresholds do treino, adicione geracao de thresholds_p{percentile}.json "
         "no run_experiment()."
     )
     return None
@@ -379,6 +629,19 @@ def predict(
             "   Manifesto sem hashes SHA256 (modo legado). Integridade nao foi validada."
         )
 
+    feature_schema = _load_feature_schema(
+        models_dir,
+        manifest=manifest,
+        strict_integrity=strict_integrity,
+    )
+    if feature_schema:
+        logger.info("   Schema de features do treino carregado para alinhamento.")
+    else:
+        logger.warning(
+            "   Schema de features nao encontrado. "
+            "Inferencia usara fallback legado baseado no scaler/config."
+        )
+
     # Carregar scaler principal do treino (NUNCA re-ajustar)
     if scaler is None:
         scaler_path = os.path.join(models_dir, "scaler.joblib")
@@ -387,31 +650,74 @@ def predict(
                 f"Scaler principal nao encontrado: {scaler_path}. "
                 "Execute run_experiment() primeiro para treinar os modelos."
             )
-        df = proc.transform_scaler(df, scaler_path=scaler_path)
+        scaler = joblib.load(scaler_path)
         logger.info(f"   Scaler carregado de {scaler_path} (sem re-ajuste)")
     else:
-        proc.scaler = scaler
-        df = proc.transform_scaler(df)
         logger.info("   Scaler carregado via manifesto (sem re-ajuste)")
 
-    iso_features = get_features_for_model("isolation_forest", df.columns.tolist())
-    hbos_features = get_features_for_model("hbos", df.columns.tolist())
-    gru_features = get_features_for_model("gru", df.columns.tolist())
+    expected_main_features = _resolve_expected_main_features(feature_schema, scaler)
+    if expected_main_features:
+        df = _align_df_with_expected_ra(
+            df,
+            expected_main_features,
+            context_label="Scaler principal",
+        )
+        remaining_cols = [c for c in df.columns if c not in expected_main_features]
+        df = df[expected_main_features + remaining_cols]
+        proc.features_to_use = expected_main_features
+    else:
+        proc.features_to_use = inferred_features
+        logger.warning(
+            "   Nao foi possivel resolver ordem esperada do scaler. "
+            "Usando features inferidas do lote atual (modo legado)."
+        )
 
-    x_iso = df[iso_features].values
-    x_hbos = df[hbos_features].values
+    proc.scaler = scaler
+    df = proc.transform_scaler(df)
+    if expected_main_features:
+        _ensure_expected_features_present(
+            df,
+            expected_main_features,
+            context_label="transform_scaler",
+        )
+
+    fallback_iso_features = get_features_for_model("isolation_forest", df.columns.tolist())
+    fallback_hbos_features = get_features_for_model("hbos", df.columns.tolist())
+    fallback_gru_features = get_features_for_model("gru", df.columns.tolist())
+    legacy_schema_missing = not bool(feature_schema)
+
+    iso_features = _resolve_feature_list(
+        feature_schema,
+        "iso_features",
+        fallback_iso_features,
+        context_label="ISO",
+        warn_on_fallback=legacy_schema_missing,
+    )
+    hbos_features = _resolve_feature_list(
+        feature_schema,
+        "hbos_features",
+        fallback_hbos_features,
+        context_label="HBOS",
+        warn_on_fallback=legacy_schema_missing,
+    )
+    gru_features = _resolve_feature_list(
+        feature_schema, "gru_features", fallback_gru_features
+    )
+
+    x_iso = _build_feature_matrix(df, iso_features, "ISO")
+    x_hbos = _build_feature_matrix(df, hbos_features, "HBOS")
 
     # Dois scalers: scaler.joblib (ISO/HBOS) e gru_scaler.joblib (Temporal).
     # Ver config/feature_config.py para explicacao do motivo da separacao.
     # GRU Scaler separado (lat/lon)
     if gru_scaler is not None:
-        x_gru = gru_scaler.transform(df[gru_features].values)
+        x_gru = gru_scaler.transform(_build_feature_matrix(df, gru_features, "GRU"))
         logger.info("   GRU Scaler carregado via manifesto")
     else:
         gru_scaler_path = os.path.join(models_dir, "gru_scaler.joblib")
         if os.path.exists(gru_scaler_path):
             gru_scaler = joblib.load(gru_scaler_path)
-            x_gru = gru_scaler.transform(df[gru_features].values)
+            x_gru = gru_scaler.transform(_build_feature_matrix(df, gru_features, "GRU"))
             logger.info(f"   GRU Scaler carregado de {gru_scaler_path}")
         else:
             logger.warning("gru_scaler.joblib nao encontrado. GRU nao sera executado.")
@@ -420,7 +726,13 @@ def predict(
     # 4. Scores ISO
     logger.info("ETAPA 4: Scores Isolation Forest")
     score_columns_audit = []
-    thresholds_loaded = load_thresholds(models_dir, percentile, manifest=manifest)
+    thresholds_loaded = load_thresholds(
+        models_dir,
+        percentile,
+        manifest=manifest,
+        strict_integrity=strict_integrity,
+        require_hash=require_hash,
+    )
     optimizer = ThresholdOptimizer([percentile])
 
     for model_name, iso_model in iso_models.items():
@@ -511,7 +823,11 @@ def predict(
     logger.info("ETAPA 7: Decisao final do ensemble")
     df = compute_ensemble_decision(df, percentile=percentile)
     if "ensemble_alert" in df.columns:
-        vehicle_risk = compute_vehicle_risk_summary(df, placa_col=map_cols["placa"])
+        vehicle_risk = compute_vehicle_risk_summary(
+            df,
+            placa_col=map_cols["placa"],
+            percentile=percentile,
+        )
     else:
         logger.warning(
             "Nenhuma coluna de decisao final foi gerada; pulando ranking de risco."

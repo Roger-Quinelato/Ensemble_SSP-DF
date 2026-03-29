@@ -4,9 +4,15 @@ outputs/
 
 # Ambiente Python
 .venv/
+.env
+.env.*
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
 
 # Git
 .git/

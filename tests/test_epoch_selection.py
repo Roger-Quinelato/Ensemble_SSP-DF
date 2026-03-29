@@ -46,25 +46,28 @@ def _latest_run_dir(output_base: Path) -> Path:
     return runs[0]
 
 
-def _score_epoch(temporal_metrics_path: Path) -> dict:
+def _score_epoch(temporal_metrics_path: Path, target_percentile: int = 95) -> dict:
     df = pd.read_csv(temporal_metrics_path)
     if df.empty:
         raise ValueError(f"{temporal_metrics_path} esta vazio")
 
-    df_p95 = df[df["Percentile"] == 95].copy()
-    if df_p95.empty:
-        raise ValueError("temporal_metrics.csv nao possui linha de Percentile=95")
+    df_target = df[df["Percentile"] == int(target_percentile)].copy()
+    if df_target.empty:
+        raise ValueError(
+            f"temporal_metrics.csv nao possui linha de Percentile={int(target_percentile)}"
+        )
 
     # Heuristica operacional sem ground truth:
-    # 1) queremos taxa de anomalia p95 perto de 5% entre avaliados;
+    # 1) queremos taxa de anomalia no percentil operacional perto de (100 - p)%;
     # 2) queremos baixa dispersao entre modelos temporais.
-    target = 5.0
-    mean_pct = float(df_p95["Pct_Anomalies_Of_Evaluated"].mean())
-    std_pct = float(df_p95["Pct_Anomalies_Of_Evaluated"].std(ddof=0))
+    target = float(max(0, 100 - int(target_percentile)))
+    mean_pct = float(df_target["Pct_Anomalies_Of_Evaluated"].mean())
+    std_pct = float(df_target["Pct_Anomalies_Of_Evaluated"].std(ddof=0))
     objective = abs(mean_pct - target) + (0.25 * std_pct)
     return {
-        "mean_pct_anomaly_eval_p95": round(mean_pct, 4),
-        "std_pct_anomaly_eval_p95": round(std_pct, 4),
+        "operational_percentile": int(target_percentile),
+        "mean_pct_anomaly_eval_operational": round(mean_pct, 4),
+        "std_pct_anomaly_eval_operational": round(std_pct, 4),
         "objective_score": round(objective, 6),
     }
 
@@ -125,9 +128,21 @@ def test_epoch_sweep_selects_best_epoch(tmp_path):
         with run_summary.open(encoding="utf-8") as f:
             summary = json.load(f)
 
-        score = _score_epoch(temporal_metrics)
+        operational_percentile = int(
+            summary.get("parameters", {}).get(
+                "operational_percentile",
+                summary.get("results_summary", {}).get("operational_percentile", 95),
+            )
+        )
+        score = _score_epoch(
+            temporal_metrics,
+            target_percentile=operational_percentile,
+        )
         score["epoch"] = epoch
         score["run_dir"] = str(run_dir)
+        score["n_alerts_operational"] = summary.get("results_summary", {}).get(
+            "n_alerts_operational"
+        )
         score["n_alerts_p95"] = summary.get("results_summary", {}).get("n_alerts_p95")
         results.append(score)
 
@@ -142,7 +157,7 @@ def test_epoch_sweep_selects_best_epoch(tmp_path):
             {
                 "best_epoch": int(best["epoch"]),
                 "objective_score": float(best["objective_score"]),
-                "criterion": "abs(mean_pct_anomaly_eval_p95-5.0) + 0.25*std",
+                "criterion": "abs(mean_pct_anomaly_eval_operational-(100-operational_percentile)) + 0.25*std",
                 "ranking": ranking.to_dict(orient="records"),
             },
             f,

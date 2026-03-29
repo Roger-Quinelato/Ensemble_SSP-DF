@@ -5,6 +5,16 @@ services:
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
+    entrypoint: ["python", "-m", "src.main"]
+    command:
+      - --config
+      - /app/config_mapeamento.yaml
+      - --input
+      - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
+      - --output-dir
+      - /app/outputs
+      - --tf-device
+      - cpu
 
   infer:
     build: .
@@ -12,16 +22,18 @@ services:
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
+    entrypoint: ["python", "-m", "src.pipeline.inference"]
     command:
-      - python
-      - -m
-      - src.pipeline.inference
       - --models-dir
-      - /app/outputs/${RUN_ID:-20260320_144331}/models_saved
+      - /app/outputs/${RUN_ID:-__SET_RUN_ID__}/models_saved
+      - --config
+      - /app/config_mapeamento.yaml
       - --input
       - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
       - --output
       - /app/outputs/${INFER_OUTPUT_DIR:-inference_output}
+      - --tf-device
+      - cpu
 
   train-gpu:
     profiles: ["gpu"]
@@ -37,16 +49,16 @@ services:
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
+    entrypoint: ["python", "-m", "src.main"]
     command:
-      - python
-      - -m
-      - src.main
-      - --tf-device
-      - ${TF_DEVICE:-gpu}
+      - --config
+      - /app/config_mapeamento.yaml
       - --input
       - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
       - --output-dir
       - /app/outputs
+      - --tf-device
+      - ${TF_DEVICE:-gpu}
 
   infer-gpu:
     profiles: ["gpu"]
@@ -62,12 +74,12 @@ services:
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
+    entrypoint: ["python", "-m", "src.pipeline.inference"]
     command:
-      - python
-      - -m
-      - src.pipeline.inference
       - --models-dir
-      - /app/outputs/${RUN_ID:-20260320_144331}/models_saved
+      - /app/outputs/${RUN_ID:-__SET_RUN_ID__}/models_saved
+      - --config
+      - /app/config_mapeamento.yaml
       - --input
       - /app/data/input/${INPUT_FILE:-amostra_ssp.csv}
       - --output

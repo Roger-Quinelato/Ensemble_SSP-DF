@@ -7,6 +7,7 @@ dado um alerta, deve ser possivel reproduzir exatamente as condicoes que o gerar
 """
 import glob
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -19,6 +20,24 @@ import pytest
 # =============================================================================
 # FIXTURE: dados sinteticos minimos
 # =============================================================================
+
+
+def _resolve_stability_tf_device():
+    """
+    Define dispositivo para teste de estabilidade.
+
+    Regra de hardening:
+    - CPU: executa com asserts estritos (requisito de auditabilidade).
+    - GPU/auto: skip explicito por risco conhecido de nao-determinismo numérico
+      em stacks CUDA/cuDNN, mesmo com seed fixo.
+    """
+    tf_device = os.environ.get("STABILITY_TF_DEVICE", "cpu").strip().lower()
+    if tf_device != "cpu":
+        pytest.skip(
+            "test_stability exige CPU para asserts estritos deterministas. "
+            "Defina STABILITY_TF_DEVICE=cpu para executar este teste."
+        )
+    return tf_device
 
 
 def _generate_synthetic_data(n_records=300, n_vehicles=20, seed=42):
@@ -54,6 +73,7 @@ class TestDeterminism:
     @pytest.fixture(scope="class")
     def two_runs_output(self, tmp_path_factory):
         """Executa pipeline duas vezes e retorna os parquets de resultado."""
+        tf_device = _resolve_stability_tf_device()
         data_dir = tmp_path_factory.mktemp("data")
         out1 = tmp_path_factory.mktemp("run1")
         out2 = tmp_path_factory.mktemp("run2")
@@ -76,6 +96,8 @@ class TestDeterminism:
                     str(data_path),
                     "--seed",
                     "42",
+                    "--tf-device",
+                    tf_device,
                 ],
                 capture_output=True,
                 text=True,
@@ -169,16 +191,51 @@ class TestThresholdStability:
     """Thresholds calibrados com mesmo seed e dados devem ser identicos."""
 
     def test_p95_thresholds_identical_between_runs(self, tmp_path):
-        """Dois treinamentos com mesmos dados e seed devem gerar thresholds iguais."""
-        del tmp_path  # Mantido para compatibilidade da assinatura solicitada.
-        runs = sorted(glob.glob("outputs/*/models_saved/thresholds_p95.json"), reverse=True)
+        """Compara thresholds apenas das duas runs criadas neste proprio teste."""
+        tf_device = _resolve_stability_tf_device()
+        data_path = tmp_path / "stability_thresholds.csv"
+        df = _generate_synthetic_data(n_records=300, n_vehicles=20, seed=42)
+        df.to_csv(data_path, index=False)
 
-        if len(runs) < 2:
-            pytest.skip("Menos de 2 runs disponiveis - executar pipeline 2x com mesmo seed")
+        out1 = tmp_path / "run_a"
+        out2 = tmp_path / "run_b"
 
-        with open(runs[0], encoding="utf-8") as f:
+        run_thresholds = []
+        for out_dir in [out1, out2]:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "src.main",
+                    "--epochs",
+                    "1",
+                    "--output-dir",
+                    str(out_dir),
+                    "--input",
+                    str(data_path),
+                    "--seed",
+                    "42",
+                    "--tf-device",
+                    tf_device,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=".",
+            )
+            if result.returncode != 0:
+                pytest.skip(
+                    f"Pipeline falhou (returncode={result.returncode}):\n"
+                    f"{result.stderr[-1000:]}"
+                )
+
+            matches = glob.glob(str(out_dir / "*/models_saved/thresholds_p95.json"))
+            if not matches:
+                pytest.skip(f"thresholds_p95.json nao encontrado em {out_dir}")
+            run_thresholds.append(matches[0])
+
+        with open(run_thresholds[0], encoding="utf-8") as f:
             t1 = json.load(f)
-        with open(runs[1], encoding="utf-8") as f:
+        with open(run_thresholds[1], encoding="utf-8") as f:
             t2 = json.load(f)
 
         common_models = set(t1.keys()) & set(t2.keys())
@@ -187,12 +244,10 @@ class TestThresholdStability:
             pytest.skip("Nenhum modelo em comum entre as duas runs")
 
         for model in common_models:
-            ratio = t1[model] / t2[model] if t2[model] != 0 else float("inf")
-            assert 0.5 <= ratio <= 2.0, (
-                f"Threshold de {model} muito diferente entre runs:\n"
-                f"  Run mais recente: {t1[model]:.6f}\n"
-                f"  Run anterior:     {t2[model]:.6f}\n"
-                f"  Razao: {ratio:.2f}x\n"
-                "Se os dados de treino eram diferentes, isso e esperado. "
-                "Se eram iguais, indica instabilidade no pipeline."
+            assert t1[model] == pytest.approx(t2[model], rel=0.0, abs=1e-12), (
+                f"Threshold de {model} difere entre runs em CPU deterministico:\n"
+                f"  Run A: {t1[model]:.12f}\n"
+                f"  Run B: {t2[model]:.12f}\n"
+                "Com mesmos dados e seed, thresholds devem ser reproduziveis "
+                "com tolerancia numerica estrita."
             )

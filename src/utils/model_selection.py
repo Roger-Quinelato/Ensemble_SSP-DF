@@ -36,6 +36,8 @@ def compute_val_stability_metrics(df_train, df_val, score_cols, percentile=95):
         pd.DataFrame com ranking de estabilidade.
     """
     results = []
+    threshold_key = f"threshold_p{int(percentile)}"
+
     for score_col in score_cols:
         if score_col not in df_train.columns or score_col not in df_val.columns:
             continue
@@ -60,7 +62,7 @@ def compute_val_stability_metrics(df_train, df_val, score_cols, percentile=95):
             {
                 "config": score_col.replace("_score", ""),
                 "score_col": score_col,
-                "threshold_p95": round(float(thresh), 6),
+                threshold_key: round(float(thresh), 6),
                 "train_anomaly_rate": round(float(train_anomaly_rate * 100), 2),
                 "val_anomaly_rate": round(float(val_anomaly_rate * 100), 2),
                 "stability_delta_pct": round(float(stability_delta * 100), 2),

@@ -12,49 +12,6 @@ import warnings
 
 import pytest
 
-
-# =============================================================================
-# FIXTURES
-# =============================================================================
-
-
-@pytest.fixture(scope="module")
-def latest_run_dir():
-    """Retorna o diretorio da run mais recente em outputs/."""
-    outputs_base = "outputs"
-    if not os.path.exists(outputs_base):
-        pytest.skip("Pasta outputs/ nao encontrada - execute run_experiment() primeiro")
-
-    runs = sorted(
-        [
-            f
-            for f in os.listdir(outputs_base)
-            if os.path.isdir(os.path.join(outputs_base, f))
-            and f != "logs"
-            and os.path.isdir(os.path.join(outputs_base, f, "models_saved"))
-        ],
-        reverse=True,
-    )
-
-    if not runs:
-        pytest.skip("Nenhuma run encontrada em outputs/")
-
-    return os.path.join(outputs_base, runs[0])
-
-
-@pytest.fixture(scope="module")
-def models_dir(latest_run_dir):
-    models_path = os.path.join(latest_run_dir, "models_saved")
-    if not os.path.exists(models_path):
-        pytest.skip(f"models_saved nao encontrado em {latest_run_dir}")
-    return models_path
-
-
-@pytest.fixture(scope="module")
-def metrics_dir(latest_run_dir):
-    return os.path.join(latest_run_dir, "metrics")
-
-
 # =============================================================================
 # TESTE 1: Thresholds serializados existem e sao validos
 # =============================================================================

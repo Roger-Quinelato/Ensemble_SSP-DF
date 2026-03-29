@@ -32,3 +32,17 @@ def test_compute_val_stability_metrics_ranks_configs():
     )
     assert out["rank_stability"].iloc[0] == 1
     assert out["stability_delta_pct"].between(0, 100).all()
+
+
+def test_compute_val_stability_metrics_uses_requested_percentile_column():
+    df_train = pd.DataFrame({"ISO_n100_score": [0.1, 0.2, 0.3, 0.4]})
+    df_val = pd.DataFrame({"ISO_n100_score": [0.35, 0.45]})
+
+    out = compute_val_stability_metrics(
+        df_train=df_train,
+        df_val=df_val,
+        score_cols=["ISO_n100_score"],
+        percentile=90,
+    )
+
+    assert "threshold_p90" in out.columns

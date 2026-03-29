@@ -4,6 +4,9 @@ Utilitarios para configurar runtime TensorFlow (CPU/GPU) de forma auditavel.
 
 import logging
 import os
+import random
+
+import numpy as np
 
 logger = logging.getLogger("sspdf")
 
@@ -74,3 +77,37 @@ def configure_tensorflow_runtime(tf_device="auto"):
         "gpu_count": gpu_count,
         "gpu_names": gpu_names,
     }
+
+
+def setup_deterministic_runtime(seed, tf_device="auto"):
+    """
+    Configura seed deterministica + runtime TensorFlow em um unico ponto.
+
+    Esta funcao deve ser chamada antes de qualquer import prematuro de
+    TensorFlow/Keras para garantir reproducibilidade entre execucoes.
+
+    Args:
+        seed: Seed global (int).
+        tf_device: "auto", "cpu" ou "gpu".
+    Returns:
+        tuple:
+            - modulo tensorflow
+            - dict de runtime com metadados e seed
+    """
+    seed_int = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed_int)
+    os.environ["TF_DETERMINISTIC_OPS"] = "1"
+    os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
+    random.seed(seed_int)
+    np.random.seed(seed_int)
+
+    tf, runtime = configure_tensorflow_runtime(tf_device=tf_device)
+    tf.random.set_seed(seed_int)
+
+    logger.info(
+        "Seed/runtime deterministico configurado | "
+        f"seed={seed_int} | tf_device={runtime['requested']} | tf_ativo={runtime['active']}"
+    )
+    runtime = dict(runtime)
+    runtime["seed"] = seed_int
+    return tf, runtime
