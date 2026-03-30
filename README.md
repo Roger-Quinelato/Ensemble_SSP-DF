@@ -871,3 +871,8 @@ Contrato dos serviços GPU no compose:
 - Sem ground truth rotulado, métricas são de consistência/concordância, não de performance supervisionada real.
 - Docker: o Dockerfile atual não define `ENTRYPOINT` (apenas `CMD`). Os serviços no `docker-compose.yml` definem `entrypoint` por serviço para resolver o contrato de `compose run`. Para `docker run` direto (sem compose), os parâmetros devem ser passados após o comando completo: `docker run --rm sspdf-anomalias python -m src.main --input ...`.
 - Cobertura temporal pode ser inferior a 100% quando veículos não possuem sequências GPS contíguas suficientes para `window_size`.
+## Maintainer
+Roger Quinelato  
+GitHub: [Roger-Quinelato](https://github.com/Roger-Quinelato)  
+E-mail: rogerquinelato1@gmail.com  
+LinkedIn: [roger-ia-dados](https://br.linkedin.com/in/roger-ia-dados)
