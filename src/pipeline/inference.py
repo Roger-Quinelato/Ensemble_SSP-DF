@@ -485,6 +485,14 @@ def load_thresholds(
     Carrega thresholds de producao salvos pelo treinamento.
     Se nao existir arquivo de thresholds, usa os percentis padrao dos scores.
     """
+    if manifest is None:
+        manifest_path = os.path.join(models_dir, "models_manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                loaded_manifest = json.load(f)
+            if isinstance(loaded_manifest, dict):
+                manifest = loaded_manifest
+
     manifest_thresh = None
     effective_require_hash = bool(strict_integrity or require_hash)
     thresh_path = os.path.join(models_dir, f"thresholds_p{percentile}.json")

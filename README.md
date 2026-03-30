@@ -675,7 +675,7 @@ Regra operacional:
 - `status=FAILED` cobre tanto erro técnico quanto interrupção manual (`KeyboardInterrupt`), por consistência de auditoria.
 
 ## Testes
-Esta suíte possui **24 arquivos de teste** em `tests/test_*.py`.
+Esta suíte possui **25 arquivos de teste** em `tests/test_*.py`.
 
 ### Comando exato para testes herméticos / CI-safe
 Use este comando para validação sem depender de run prévia em `outputs/`:
@@ -725,7 +725,7 @@ pytest tests/test_stability.py -v
 Tempo esperado (suíte completa): [ESTIMAR] ~2-5 min em CPU 4-core (depende de epochs e volume de dados).  
 Tempo esperado (somente estabilidade): [ESTIMAR] ~1-3 min (duas runs com `--epochs 1`).
 
-### Grupos funcionais (24 testes)
+### Grupos funcionais (25 arquivos de teste)
 1. **Integridade e utilitários de infraestrutura**  
 Valida hash/manifesto, runtime, tracking, logging e contratos básicos de configuração.  
 Arquivos: `test_artifact_integrity.py`, `test_feature_config_unit.py`, `test_git_utils.py`, `test_logger_utils_unit.py`, `test_tf_runtime_unit.py`, `test_tracking_unit.py`.

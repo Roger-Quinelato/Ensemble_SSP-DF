@@ -50,8 +50,8 @@ mlartifacts/
 
 # Ferramentas, Agentes e IAs (Codex, Antigravity, VSCode)
 .vscode/
-! .vscode/settings.json
-! .vscode/launch.json
+!.vscode/settings.json
+!.vscode/launch.json
 .cursor/
 .cursorrules
 .gemini/
