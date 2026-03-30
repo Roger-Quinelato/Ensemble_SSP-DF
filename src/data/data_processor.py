@@ -83,6 +83,19 @@ class DataProcessor:
             logger.error("Verifique se os dados de entrada seguem o formato esperado.")
             raise
 
+        duplicate_mask = df.duplicated(subset=["placa", "timestamp"], keep="first")
+        n_duplicates = int(duplicate_mask.sum())
+        if n_duplicates > 0:
+            before = len(df)
+            df = df.drop_duplicates(subset=["placa", "timestamp"], keep="first")
+            removed = before - len(df)
+            logger.warning(
+                "Detectadas %d duplicatas na chave (placa, timestamp). "
+                "Aplicando drop_duplicates(keep='first'). Removidas=%d.",
+                n_duplicates,
+                removed,
+            )
+
         return df
 
     def _haversine_vectorized(self, lat1, lon1, lat2, lon2):

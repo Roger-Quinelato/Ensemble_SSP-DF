@@ -1,5 +1,9 @@
 import json
 from pathlib import Path
+import pytest
+
+
+pytestmark = [pytest.mark.integration]
 
 
 def test_pipeline_flow_outputs_exist(latest_run_dir):

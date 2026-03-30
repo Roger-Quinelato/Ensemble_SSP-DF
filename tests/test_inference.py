@@ -8,6 +8,9 @@ import pytest
 from src.pipeline.inference import predict
 
 
+pytestmark = [pytest.mark.integration]
+
+
 def _prepare_input_for_inference(tmp_path):
     input_path = Path("data/input/amostra_ssp.csv")
     if not input_path.exists():

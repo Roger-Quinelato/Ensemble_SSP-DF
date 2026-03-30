@@ -32,6 +32,7 @@ from src.utils.evaluation import ThresholdOptimizer
 from src.utils.artifact_utils import verify_artifact_strict
 from src.utils.tf_runtime import configure_tensorflow_runtime
 from src.utils.logger_utils import resolve_os_user
+from src.utils.config_schema import validate_inference_config
 from src.utils.path_security import normalize_cli_path
 
 logger = logging.getLogger("sspdf")
@@ -647,8 +648,9 @@ def predict(
     logger.info(f"   Output:     {output_dir}")
     logger.info("=" * 80)
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    config = validate_inference_config(config)
 
     tf, tf_runtime = configure_tensorflow_runtime(tf_device=tf_device)
     tf_seed = int(config.get("random_state", 42))

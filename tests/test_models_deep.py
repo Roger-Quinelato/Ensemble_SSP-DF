@@ -8,6 +8,21 @@ import pytest
 import numpy as np
 from src.models.temporal_autoencoder import TemporalAutoencoder
 
+
+class _FakeModelOOM:
+    def fit(self, *args, **kwargs):
+        raise MemoryError("oom")
+
+
+class ResourceExhaustedError(Exception):
+    pass
+
+
+class _FakeModelResourceExhausted:
+    def fit(self, *args, **kwargs):
+        raise ResourceExhaustedError("resource exhausted")
+
+
 def test_create_sequences_with_index():
     X = np.random.rand(20, 3)
     vehicle_ids = ['A']*10 + ['B']*10
@@ -32,3 +47,27 @@ def test_train_evaluate():
     mse, idx, model = pipeline.train_evaluate('test', epochs=1)
     assert mse is not None
     assert idx is not None
+
+
+@pytest.mark.parametrize(
+    "fake_model_factory",
+    [
+        lambda: _FakeModelOOM(),
+        lambda: _FakeModelResourceExhausted(),
+    ],
+)
+def test_train_evaluate_returns_none_on_oom_like_errors(monkeypatch, fake_model_factory):
+    X = np.random.rand(20, 3)
+    vehicle_ids = ['A']*10 + ['B']*10
+    timestamps = np.arange(20)
+    original_indices = list(range(20))
+    pipeline = TemporalAutoencoder(
+        X, vehicle_ids, timestamps, original_indices, window_size=3, max_gap_seconds=100
+    )
+
+    monkeypatch.setattr(pipeline, "_build_model", lambda *_: fake_model_factory())
+
+    mse, idx, model = pipeline.train_evaluate('oom_like', epochs=1, batch_size=8)
+    assert mse is None
+    assert idx is None
+    assert model is None

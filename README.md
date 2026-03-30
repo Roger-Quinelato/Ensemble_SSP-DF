@@ -66,6 +66,17 @@ Leitura recomendada para desenvolvedor:
 - usar `model_selection_val.csv` para identificar quais variantes tabulares ficaram mais estáveis entre treino e validação;
 - cruzar esse ranking com os modelos temporais derivados da mesma combinação ISO/HBOS quando for necessário hardening operacional por política interna.
 
+### 2.2.1 Atualização de Governança Operacional Temporal
+Política operacional vigente:
+- `parametros.temporal.temporal_strategy` aceita `all` (legado), `union`, `inter` ou `baseline`.
+- `all` mantém comportamento analítico retrocompatível com todos os cenários temporais ativos.
+- `union|inter|baseline` aplicam filtro operacional explícito antes da exportação final, removendo cenários temporais não eleitos.
+
+Auditabilidade:
+- `run_summary.json` inclui `temporal_strategy_configured`, `temporal_strategy_effective` e `temporal_strategy_selection_source`.
+- `model_selection_val.csv` inclui colunas de contexto da política temporal.
+- `temporal_strategy_selection_val.csv` resume estabilidade por estratégia temporal usando apenas treino/validação.
+
 ## Diagrama da Arquitetura Operacional
 O diagrama abaixo cobre as sete camadas do sistema, da ingestão de dados brutos até a camada de auditoria, com variantes de modelo, contratos de artefato e modos de inferência.
 

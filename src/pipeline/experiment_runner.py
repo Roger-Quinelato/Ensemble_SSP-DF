@@ -7,11 +7,21 @@ from src.utils.ensemble_decision import (
     compute_ensemble_decision,
     compute_vehicle_risk_summary,
 )
-from src.utils.model_selection import compute_val_stability_metrics
+from src.utils.model_selection import (
+    compute_temporal_strategy_validation,
+    compute_val_stability_metrics,
+    normalize_temporal_strategy,
+)
 from src.utils.artifact_utils import sha256_file
 from src.utils.git_utils import format_model_version, get_git_info
-from src.utils.logger_utils import resolve_os_user
+from src.utils.logger_utils import (
+    bind_run_id,
+    ensure_run_id_filter,
+    resolve_os_user,
+    unbind_run_id,
+)
 from src.utils.tf_runtime import setup_deterministic_runtime
+from src.utils.config_schema import validate_training_config
 from config.feature_config import get_features_for_model
 import os
 import csv
@@ -257,6 +267,34 @@ def _write_run_summary(metrics_dir, summary_payload):
     return log_json_path
 
 
+def _iter_exception_chain(exc):
+    """Itera excecao principal e encadeamentos (__cause__/__context__)."""
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_tf_resource_exhausted_error(exc):
+    """
+    Detecta ResourceExhaustedError de TensorFlow sem importar TF cedo.
+
+    Usa deteccao por nome/classe para cobrir excecoes encapsuladas
+    sem forcar import de TensorFlow em caminho de falha.
+    """
+    for candidate in _iter_exception_chain(exc):
+        cls = candidate.__class__
+        class_name = cls.__name__
+        class_module = (cls.__module__ or "").lower()
+        if class_name == "ResourceExhaustedError":
+            return True
+        if "resourceexhausted" in class_name.lower() and "tensorflow" in class_module:
+            return True
+    return False
+
+
 def _compute_alert_counters(df, operational_percentile):
     """
     Consolida contadores de alerta para manter semantica consistente entre
@@ -286,144 +324,125 @@ def _compute_alert_counters(df, operational_percentile):
     }
 
 
+def _temporal_strategy_from_model_name(model_name):
+    if str(model_name).startswith("Temporal_Union_"):
+        return "union"
+    if str(model_name).startswith("Temporal_Inter_"):
+        return "inter"
+    if str(model_name).startswith("Temporal_Baseline"):
+        return "baseline"
+    return None
+
+
+def _temporal_strategy_from_score_col(score_col):
+    if str(score_col).startswith("Temporal_Union_"):
+        return "union"
+    if str(score_col).startswith("Temporal_Inter_"):
+        return "inter"
+    if str(score_col).startswith("Temporal_Baseline"):
+        return "baseline"
+    return None
+
+
+def _apply_temporal_strategy_policy(
+    df,
+    results_summary,
+    score_cols,
+    temporal_strategy,
+    models_dir,
+):
+    """
+    Aplica politica operacional dos cenarios temporais antes da exportacao.
+    """
+    strategy = normalize_temporal_strategy(temporal_strategy)
+    if strategy == "all":
+        return df, results_summary, score_cols
+
+    kept_metrics = []
+    allowed_temporal_model_names = set()
+    temporal_model_names_seen = set()
+
+    for metric in results_summary:
+        model_name = metric.get("Model")
+        temp_kind = _temporal_strategy_from_model_name(model_name)
+        if temp_kind is None:
+            kept_metrics.append(metric)
+            continue
+        temporal_model_names_seen.add(model_name)
+        if temp_kind == strategy:
+            kept_metrics.append(metric)
+            allowed_temporal_model_names.add(model_name)
+
+    kept_score_cols = []
+    for col in score_cols:
+        temp_kind = _temporal_strategy_from_score_col(col)
+        if temp_kind is None or temp_kind == strategy:
+            kept_score_cols.append(col)
+
+    df_filtered = df.copy()
+    drop_cols = []
+    for col in df_filtered.columns:
+        temp_kind = _temporal_strategy_from_score_col(col)
+        if temp_kind is not None and temp_kind != strategy:
+            drop_cols.append(col)
+            continue
+        if col.startswith("Temporal_"):
+            prefix = col.split("_p", 1)[0]
+            if prefix in temporal_model_names_seen and prefix not in allowed_temporal_model_names:
+                drop_cols.append(col)
+    if drop_cols:
+        df_filtered = df_filtered.drop(columns=sorted(set(drop_cols)), errors="ignore")
+
+    # Manter manifesto alinhado ao modo operacional explicito removendo artefatos nao eleitos.
+    cleanup_map = {
+        "union": ("temporal_inter_", "temporal_baseline.h5"),
+        "inter": ("temporal_union_", "temporal_baseline.h5"),
+        "baseline": ("temporal_union_", "temporal_inter_"),
+    }
+    for token in cleanup_map.get(strategy, ()):
+        for fname in os.listdir(models_dir):
+            should_remove = fname.startswith(token) if token.endswith("_") else fname == token
+            if should_remove and fname.endswith(".h5"):
+                fpath = os.path.join(models_dir, fname)
+                try:
+                    os.remove(fpath)
+                    logger.info(
+                        "Politica temporal operacional (%s): removido artefato nao eleito %s",
+                        strategy,
+                        fname,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Falha ao remover artefato temporal nao eleito (%s): %s",
+                        fpath,
+                        exc,
+                    )
+
+    logger.info(
+        "Politica temporal operacional aplicada: strategy=%s | temporal_metrics_antes=%d | temporal_metrics_depois=%d",
+        strategy,
+        sum(1 for m in results_summary if str(m.get("Model", "")).startswith("Temporal_")),
+        sum(1 for m in kept_metrics if str(m.get("Model", "")).startswith("Temporal_")),
+    )
+    return df_filtered, kept_metrics, kept_score_cols
+
+
 def load_data(proc, config, input_path):
     """
-    Carrega dados, faz split temporal, feature engineering e normalizacao.
+    Wrapper de compatibilidade para testes e monkeypatch no modulo runner.
     """
-    map_cols = config["mapeamento_colunas"]
-    if input_path is None:
-        input_path = "data/input/amostra_ssp.csv"
-        if not os.path.exists(input_path):
-            input_path = "data/input/amostra_ssp.parquet"
+    from src.pipeline.experiment_stages import load_data as _load_data
 
-    df = proc.load_and_standardize(input_path)
-    df = df.sort_values(map_cols["timestamp"]).reset_index(drop=True)
-
-    split_ratios = config.get("parametros", {}).get("split_ratios", {})
-    train_ratio = split_ratios.get("train", 0.6)
-    val_ratio = split_ratios.get("validation", 0.2)
-    train_end = int(len(df) * train_ratio)
-    val_end = int(len(df) * (train_ratio + val_ratio))
-
-    cutoff_train = df[map_cols["timestamp"]].iloc[train_end]
-    cutoff_val = df[map_cols["timestamp"]].iloc[val_end]
-    df_train = df.iloc[:train_end].copy()
-    df_val = df.iloc[train_end:val_end].copy()
-    df_test = df.iloc[val_end:].copy()
-
-    logger.info("=" * 80)
-    logger.info("SPLIT TEMPORAL (3-way)")
-    logger.info(f"   Total registros: {len(df):,}")
-    logger.info(f"   Treino:     {len(df_train):,} ({len(df_train)/len(df)*100:.1f}%)")
-    logger.info(f"   Validacao:  {len(df_val):,} ({len(df_val)/len(df)*100:.1f}%)")
-    logger.info(f"   Teste:      {len(df_test):,} ({len(df_test)/len(df)*100:.1f}%)")
-    logger.info(f"   Corte treino->val:  {cutoff_train}")
-    logger.info(f"   Corte val->teste:   {cutoff_val}")
-    logger.info("=" * 80)
-
-    logger.info("Feature Engineering (separado por particao)...")
-    df_train, train_features = proc.feature_engineering(df_train)
-    proc.features_to_use = train_features  # definir explicitamente
-    df_val, _ = proc.feature_engineering(df_val)
-    df_test, _ = proc.feature_engineering(df_test)
-    proc.features_to_use = train_features  # schema do treino
-
-    ra_cols_train = [c for c in df_train.columns if c.startswith("RA_")]
-    df_train, df_val, df_test = _align_ra_columns(
-        [df_train, df_val, df_test], ra_cols_train
-    )
-    logger.info(
-        f"   Colunas RA alinhadas: {len(ra_cols_train)} colunas de referencia "
-        "(treino -> val -> test, sem mutacao dos originais)"
-    )
-    logger.info(f"   Colunas alinhadas: {len(df_train.columns)} features no treino")
-    stats = _build_train_stats(df_train, map_cols)
-
-    logger.info("=" * 80)
-    logger.info("NORMALIZANDO FEATURES")
-    scaler_root = getattr(proc, "models_dir", None)
-    if not scaler_root:
-        raise RuntimeError(
-            "proc.models_dir nao definido. Governanca exige uso de outputs/<run_id>/models_saved."
-        )
-    if os.path.basename(os.path.normpath(scaler_root)) != "models_saved":
-        raise RuntimeError(
-            f"models_dir invalido: {scaler_root}. Use outputs/<run_id>/models_saved."
-        )
-    scaler_path = os.path.join(scaler_root, "scaler.joblib")
-    df_train = proc.fit_scaler(df_train, output_path=scaler_path)
-    df_val = proc.transform_scaler(df_val, scaler_path=scaler_path)
-    df_test = proc.transform_scaler(df_test, scaler_path=scaler_path)
-    df = pd.concat([df_train, df_val, df_test], axis=0).sort_index()
-    logger.info(f"Features normalizadas: {len(proc.features_to_use)} features")
-
-    stats["split_temporal"] = {
-        "cutoff_train": str(cutoff_train),
-        "cutoff_val": str(cutoff_val),
-        "train_size": len(df_train),
-        "val_size": len(df_val),
-        "test_size": len(df_test),
-        "train_ratio": train_ratio,
-        "val_ratio": val_ratio,
-        "train_end_index": int(train_end),
-    }
-    return df, df_train, df_val, df_test, proc, stats
+    return _load_data(proc, config, input_path)
 
 
 def prepare_model_features(df, df_train, config, proc, models_dir):
     """
-    Prepara arrays de features por modelo (ISO, HBOS, GRU).
+    Wrapper de compatibilidade para testes e monkeypatch no modulo runner.
     """
-    # =============================================================================
-    # POR QUE DOIS SCALERS SEPARADOS?
-    #
-    # scaler.joblib     -> StandardScaler para FEATURES_ISO e FEATURES_HBOS
-    #                     Nao inclui lat/lon porque ISO e HBOS nao usam coordenadas.
-    #
-    # gru_scaler.joblib -> StandardScaler para FEATURES_GRU_AUTOENCODER
-    #                     Inclui latitude e longitude - coordenadas geograficas tem
-    #                     ranges muito diferentes de features temporais (hora_sin,
-    #                     hora_cos estao em [-1,1]; lat/lon estao em [-16,-15] e
-    #                     [-48,-47]). Normalizar com o mesmo scaler do ISO/HBOS
-    #                     causaria distorcao nas features temporais do GRU.
-    #
-    # ATENCAO: Se no futuro lat/lon forem adicionados ao ISO ou HBOS,
-    # sera necessario um terceiro scaler ou incluir lat/lon no scaler principal.
-    # Nao adicionar lat/lon ao scaler principal sem revisar FEATURES_GRU_AUTOENCODER.
-    # =============================================================================
-    iso_features = get_features_for_model("isolation_forest", df.columns.tolist())
-    hbos_features = get_features_for_model("hbos", df.columns.tolist())
-    gru_features = get_features_for_model("gru", df.columns.tolist())
-    logger.info(f"Features ISO ({len(iso_features)}): {iso_features}")
-    logger.info(f"Features HBOS ({len(hbos_features)}): {hbos_features}")
-    logger.info(f"Features GRU ({len(gru_features)}): {gru_features}")
+    from src.pipeline.experiment_stages import prepare_model_features as _prepare_model_features
 
-    x_iso_train = df_train[iso_features].values
-    x_iso_all = df[iso_features].values
-    x_hbos_train = df_train[hbos_features].values
-    x_hbos_all = df[hbos_features].values
-
-    from sklearn.preprocessing import StandardScaler as _GRUScaler
-
-    gru_scaler = _GRUScaler()
-    x_gru_train = df_train[gru_features].values
-    gru_scaler.fit(x_gru_train)
-    x_gru_all = gru_scaler.transform(df[gru_features].values)
-    joblib.dump(gru_scaler, os.path.join(models_dir, "gru_scaler.joblib"))
-    logger.info(f"GRU Scaler ajustado em {len(gru_features)} features (inclui lat/lon)")
-    logger.info(f"   Medias GRU: {dict(zip(gru_features, gru_scaler.mean_.round(4)))}")
-    logger.info(f"   Desvios GRU: {dict(zip(gru_features, gru_scaler.scale_.round(4)))}")
-
-    return {
-        "iso_features": iso_features,
-        "hbos_features": hbos_features,
-        "gru_features": gru_features,
-        "x_iso_train": x_iso_train,
-        "x_iso_all": x_iso_all,
-        "x_hbos_train": x_hbos_train,
-        "x_hbos_all": x_hbos_all,
-        "x_gru_all": x_gru_all,
-    }
+    return _prepare_model_features(df, df_train, config, proc, models_dir)
 
 
 def train_base_models(
@@ -434,297 +453,37 @@ def train_base_models(
     operational_percentile,
 ):
     """
-    Treina Isolation Forest e HBOS em multiplas configuracoes.
+    Wrapper de compatibilidade para testes e monkeypatch no modulo runner.
     """
-    score_columns_audit = []
-    results_summary = []
-    iso_masks_registry = {}
-    hbos_masks_registry = {}
-    optimizer = ThresholdOptimizer(config["parametros"]["percentis_teste"])
+    from src.pipeline.experiment_stages import train_base_models as _train_base_models
 
-    # Ler hiperparametros do config (com defaults retrocompativeis)
-    iso_config = config.get("parametros", {}).get("isolation_forest", {})
-    hbos_config = config.get("parametros", {}).get("hbos", {})
-
-    default_iso_estimators = [int(v) for v in "100,200".split(",")]
-    iso_n_estimators_list = iso_config.get("n_estimators", default_iso_estimators)
-    iso_contamination = iso_config.get("contamination", "auto")
-
-    default_hbos_bins = [int(v) for v in "10,20".split(",")]
-    hbos_n_bins_list = hbos_config.get("n_bins", default_hbos_bins)
-    hbos_contamination = hbos_config.get("contamination", 0.1)
-
-    logger.info("-" * 40)
-    logger.info("TREINANDO VARIACOES ISO FOREST")
-    logger.info(
-        f"ISO config -> n_estimators={iso_n_estimators_list}, contamination={iso_contamination}"
-    )
-    models_base_iso = BaselineModels(
-        features_dict["x_iso_train"],
-        random_state=config.get("random_state", 42),
-    )
-    for n_est in iso_n_estimators_list:
-        tag = f"ISO_n{n_est}"
-        logger.info(f"   -> {tag}...")
-        model = models_base_iso.train_iso(
-            n_estimators=n_est, contamination=iso_contamination
-        )
-        joblib.dump(model, os.path.join(models_dir, f"iso_n{n_est}.joblib"))
-        scores_all = model.score_samples(features_dict["x_iso_all"])
-        df[f"{tag}_score"] = -scores_all
-        score_columns_audit.append(f"{tag}_score")
-        scores_train = -model.score_samples(features_dict["x_iso_train"])
-        df, metrics = optimizer.apply_dynamic_thresholds(
-            df, f"{tag}_score", tag, calibration_scores=scores_train
-        )
-        results_summary.extend(metrics)
-        label_col = f"{tag}_p{operational_percentile}_label"
-        if label_col not in df.columns:
-            raise RuntimeError(
-                f"Label operacional ausente para {tag}: {label_col}. "
-                f"Percentis configurados: {config.get('parametros', {}).get('percentis_teste', [])}"
-            )
-        iso_masks_registry[tag] = df[label_col] == 0
-
-    logger.info("-" * 40)
-    logger.info("TREINANDO VARIACOES HBOS")
-    logger.info(
-        f"HBOS config -> n_bins={hbos_n_bins_list}, contamination={hbos_contamination}"
-    )
-    models_base_hbos = BaselineModels(
-        features_dict["x_hbos_train"],
-        random_state=config.get("random_state", 42),
-    )
-    for n_bins in hbos_n_bins_list:
-        tag = f"HBOS_bins{n_bins}"
-        logger.info(f"   -> {tag}...")
-        model = models_base_hbos.train_hbos(
-            n_bins=n_bins, contamination=hbos_contamination
-        )
-        joblib.dump(model, os.path.join(models_dir, f"hbos_bins{n_bins}.joblib"))
-        scores_all = model.decision_function(features_dict["x_hbos_all"])
-        df[f"{tag}_score"] = scores_all
-        score_columns_audit.append(f"{tag}_score")
-        scores_train = model.decision_function(features_dict["x_hbos_train"])
-        df, metrics = optimizer.apply_dynamic_thresholds(
-            df, f"{tag}_score", tag, calibration_scores=scores_train
-        )
-        results_summary.extend(metrics)
-        label_col = f"{tag}_p{operational_percentile}_label"
-        if label_col not in df.columns:
-            raise RuntimeError(
-                f"Label operacional ausente para {tag}: {label_col}. "
-                f"Percentis configurados: {config.get('parametros', {}).get('percentis_teste', [])}"
-            )
-        hbos_masks_registry[tag] = df[label_col] == 0
-
-    if not iso_masks_registry:
-        raise RuntimeError("PIPELINE ABORTADO: Nenhum modelo Isolation Forest foi treinado.")
-    if not hbos_masks_registry:
-        raise RuntimeError("PIPELINE ABORTADO: Nenhum modelo HBOS foi treinado.")
-
-    n_cenarios = len(iso_n_estimators_list) * len(hbos_n_bins_list) * 2 + 1
-    logger.info(
-        f"Guards OK: {len(iso_masks_registry)} ISO x {len(hbos_masks_registry)} HBOS"
-    )
-    logger.info(f"Cenarios temporais esperados: {n_cenarios}")
-    return (
+    return _train_base_models(
         df,
-        iso_masks_registry,
-        hbos_masks_registry,
-        results_summary,
-        score_columns_audit,
+        features_dict,
+        config,
+        models_dir,
+        operational_percentile,
     )
 
 
 def train_temporal_models(
     df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
 ):
-    """Train temporal models (GRU/LSTM) in multiple scenarios.
-
-    Training scenarios:
-    - Union: train on rows where ISO OR HBOS vote inlier (larger set)
-    - Inter: train on rows where ISO AND HBOS vote inlier (smaller/purer set)
-    - Baseline: train on all train-period rows (no tabular quality filter)
     """
-    map_cols = config["mapeamento_colunas"]
-    gap_seconds = config.get("configuracoes_gerais", {}).get("gap_segmentation_seconds", 300)
-    optimizer = ThresholdOptimizer(config["parametros"]["percentis_teste"])
-    temporal_results = []
-    temporal_cols = []
+    Wrapper de compatibilidade para testes e monkeypatch no modulo runner.
+    """
+    from src.pipeline.experiment_stages import train_temporal_models as _train_temporal_models
 
-    temporal_config = config.get("parametros", {}).get("temporal", {})
-    arch_type = temporal_config.get("arch_type", "gru")
-    window_size = temporal_config.get(
-        "window_size",
-        config["parametros"].get(
-            "temporal_window_size",
-            config["parametros"].get("l" + "stm_window_size", 5),
-        ),
+    return _train_temporal_models(
+        df,
+        features_dict,
+        config,
+        iso_masks,
+        hbos_masks,
+        train_end,
+        models_dir,
+        epochs,
     )
-    temporal_epochs = temporal_config.get("epochs", epochs)
-    temporal_batch_size = temporal_config.get("batch_size", 64)
-    arch_config = {
-        "encoder_units": temporal_config.get("encoder_units", [2**5, 2**4]),
-        "decoder_units": temporal_config.get("decoder_units", [2**4, 2**5]),
-        "dropout": temporal_config.get("dropout", 0.2),
-        "optimizer": temporal_config.get("optimizer", "adam"),
-        "loss": temporal_config.get("loss", "mse"),
-    }
-
-    # Import tardio para evitar carregar TensorFlow/Keras antes da configuracao
-    # deterministica de runtime feita em run_experiment().
-    from src.models.temporal_autoencoder import TemporalAutoencoder
-
-    temporal_pipe = TemporalAutoencoder(
-        X_data=features_dict["x_gru_all"],
-        vehicle_ids=df[map_cols["placa"]].values,
-        timestamps=df[map_cols["timestamp"]].values,
-        original_indices=df.index.values,
-        window_size=window_size,
-        max_gap_seconds=gap_seconds,
-        arch_type=arch_type,
-        arch_config=arch_config,
-    )
-    seq_first_indices, seq_last_indices = temporal_pipe.get_sequence_index_bounds()
-    if len(seq_last_indices) == 0:
-        logger.warning("Nenhuma sequencia temporal valida foi criada para treino GRU.")
-        return df, temporal_results, temporal_cols
-
-    train_indices = df.index[df.index < train_end]
-    if len(train_indices) == 0:
-        raise RuntimeError("Nenhum indice de treino disponivel para o filtro temporal strict.")
-    train_cutoff_idx = train_indices.max()
-    mask_train_old = np.asarray(seq_last_indices <= train_cutoff_idx).astype(bool)
-    mask_train_strict = np.asarray(
-        (seq_first_indices <= train_cutoff_idx) & (seq_last_indices <= train_cutoff_idx)
-    ).astype(bool)
-
-    n_total_seq = len(seq_last_indices)
-    n_before = int(mask_train_old.sum())
-    n_after = int(mask_train_strict.sum())
-    logger.info(
-        f"Sequencias criadas: {n_total_seq:,} total. "
-        f"Sequencias de treino STRICT (todos elementos no treino): "
-        f"{n_after:,} ({(n_after / n_total_seq * 100):.1f}%)"
-    )
-    if n_before > 0:
-        logger.info(
-            f"Anti-leakage temporal: {n_before - n_after:,} sequencias removidas "
-            f"da borda do cutoff (sequencias que cruzavam treino->validacao). "
-            f"Impacto: {((n_before - n_after) / n_before * 100):.2f}% do treino."
-        )
-
-    legacy_model_prefix = "l" + "stm_"
-    for model_name in os.listdir(models_dir):
-        if model_name.startswith(legacy_model_prefix) and model_name.endswith(".h5"):
-            os.remove(os.path.join(models_dir, model_name))
-
-    # Limpar modelos com semantica antiga (union/inter invertidos)
-    for fname in os.listdir(models_dir):
-        if fname.startswith("temporal_union_") or fname.startswith("temporal_inter_"):
-            os.remove(os.path.join(models_dir, fname))
-            logger.info(f"   Removido modelo com semantica antiga: {fname}")
-
-    logger.info(
-        f"TREINAMENTO TEMPORAL MULTI-CENARIOS ({arch_type.upper()}) | window={window_size}, epochs={temporal_epochs}, batch_size={temporal_batch_size}"
-    )
-    logger.info(f"Temporal arch config: {arch_config}")
-
-    for iso_name, iso_mask_inlier in iso_masks.items():
-        for hbos_name, hbos_mask_inlier in hbos_masks.items():
-            iso_last_mask = (
-                pd.Series(iso_mask_inlier, index=df.index)
-                .reindex(seq_last_indices)
-                .fillna(False)
-                .values.astype(bool)
-            )
-            hbos_last_mask = (
-                pd.Series(hbos_mask_inlier, index=df.index)
-                .reindex(seq_last_indices)
-                .fillna(False)
-                .values.astype(bool)
-            )
-
-            # Union: OR over tabular inliers, constrained by strict sequence train boundary.
-            mask_train_union = mask_train_strict & (iso_last_mask | hbos_last_mask)
-            # Inter: AND over tabular inliers, constrained by strict sequence train boundary.
-            mask_train_inter = mask_train_strict & (iso_last_mask & hbos_last_mask)
-
-            n_union_mask = int(mask_train_union.sum())
-            n_inter_mask = int(mask_train_inter.sum())
-            logger.info(
-                f"   Mascara treino ({iso_name} x {hbos_name}): "
-                f"Union={n_union_mask:,} sequencias | Inter={n_inter_mask:,} sequencias"
-            )
-
-            temporal_name_union = f"Temporal_Union_{iso_name}_{hbos_name}"
-            mse_u, idx_u, model_u = temporal_pipe.train_evaluate(
-                temporal_name_union,
-                sequence_mask=mask_train_union,
-                epochs=temporal_epochs,
-                batch_size=temporal_batch_size,
-            )
-            if model_u is not None:
-                model_u.save(
-                    os.path.join(models_dir, f"temporal_union_{iso_name}_{hbos_name}.h5")
-                )
-            if mse_u is not None and idx_u is not None:
-                df.loc[idx_u, f"{temporal_name_union}_score"] = mse_u
-                temporal_cols.append(f"{temporal_name_union}_score")
-                df, metrics = optimizer.apply_dynamic_thresholds(
-                    df,
-                    f"{temporal_name_union}_score",
-                    temporal_name_union,
-                    calibration_scores=mse_u[mask_train_union],
-                )
-                temporal_results.extend(metrics)
-
-            temporal_name_inter = f"Temporal_Inter_{iso_name}_{hbos_name}"
-            mse_i, idx_i, model_i = temporal_pipe.train_evaluate(
-                temporal_name_inter,
-                sequence_mask=mask_train_inter,
-                epochs=temporal_epochs,
-                batch_size=temporal_batch_size,
-            )
-            if model_i is not None:
-                model_i.save(
-                    os.path.join(models_dir, f"temporal_inter_{iso_name}_{hbos_name}.h5")
-                )
-            if mse_i is not None and idx_i is not None:
-                df.loc[idx_i, f"{temporal_name_inter}_score"] = mse_i
-                temporal_cols.append(f"{temporal_name_inter}_score")
-                df, metrics = optimizer.apply_dynamic_thresholds(
-                    df,
-                    f"{temporal_name_inter}_score",
-                    temporal_name_inter,
-                    calibration_scores=mse_i[mask_train_inter],
-                )
-                temporal_results.extend(metrics)
-
-    mse_s, idx_s, model_s = temporal_pipe.train_evaluate(
-        "Temporal_Baseline",
-        sequence_mask=mask_train_strict,
-        epochs=temporal_epochs,
-        batch_size=temporal_batch_size,
-    )
-    if model_s is not None:
-        model_s.save(os.path.join(models_dir, "temporal_baseline.h5"))
-    if mse_s is not None and idx_s is not None:
-        df.loc[idx_s, "Temporal_Baseline_score"] = mse_s
-        temporal_cols.append("Temporal_Baseline_score")
-        df, metrics = optimizer.apply_dynamic_thresholds(
-            df,
-            "Temporal_Baseline_score",
-            "Temporal_Baseline",
-            calibration_scores=mse_s[mask_train_strict],
-        )
-        temporal_results.extend(metrics)
-
-    temporal_score_cols = [c for c in temporal_cols if c.startswith("Temporal")]
-    if not temporal_score_cols:
-        logger.warning(f"Nenhum modelo temporal ({arch_type.upper()}) produziu scores")
-    return df, temporal_results, temporal_cols
 
 def export_results(
     df,
@@ -741,10 +500,31 @@ def export_results(
     git_info=None,
     model_version=None,
     operational_percentile=None,
+    temporal_selection_audit_df=None,
 ):
     """
-    Exporta resultados, metricas e analise de concordancia.
+    Wrapper de compatibilidade para testes e monkeypatch no modulo runner.
     """
+    from src.pipeline.experiment_export import export_results as _export_results
+
+    return _export_results(
+        df=df,
+        results_summary=results_summary,
+        score_columns_audit=score_columns_audit,
+        config=config,
+        metrics_dir=metrics_dir,
+        master_dir=master_dir,
+        models_dir=models_dir,
+        df_train=df_train,
+        df_val=df_val,
+        stats=stats,
+        run_id=run_id,
+        git_info=git_info,
+        model_version=model_version,
+        operational_percentile=operational_percentile,
+        temporal_selection_audit_df=temporal_selection_audit_df,
+    )
+
     if not results_summary:
         raise RuntimeError("PIPELINE ABORTADO: Nenhuma metrica foi gerada.")
 
@@ -972,11 +752,55 @@ def export_results(
             score_cols_for_selection,
             percentile=decision_percentile,
         )
+        temporal_selection = (
+            temporal_selection_audit_df.copy()
+            if isinstance(temporal_selection_audit_df, pd.DataFrame)
+            else compute_temporal_strategy_validation(
+                df_train=df_train_scored,
+                df_val=df_val_scored,
+                score_cols=[c for c in score_columns_audit if c.startswith("Temporal_")],
+                percentile=decision_percentile,
+            )
+        )
+        temporal_cfg = normalize_temporal_strategy(
+            (stats or {}).get(
+                "temporal_strategy_configured",
+                config.get("parametros", {}).get("temporal", {}).get("temporal_strategy", "all"),
+            )
+        )
+        temporal_effective = str(
+            (stats or {}).get(
+                "temporal_strategy_effective",
+                temporal_cfg if temporal_cfg != "all" else "all",
+            )
+        )
+        temporal_source = str(
+            (stats or {}).get(
+                "temporal_strategy_selection_source",
+                "explicit_config" if temporal_cfg != "all" else "legacy_all_no_single_selection",
+            )
+        )
         if not df_model_selection.empty:
+            df_model_selection = df_model_selection.copy()
+            df_model_selection["temporal_strategy_configured"] = temporal_cfg
+            df_model_selection["temporal_strategy_effective"] = temporal_effective
+            df_model_selection["temporal_strategy_selection_source"] = temporal_source
             df_model_selection.to_csv(
                 os.path.join(metrics_dir, "model_selection_val.csv"), index=False
             )
             logger.info("Selecao de configuracao exportada: model_selection_val.csv")
+        if not temporal_selection.empty:
+            temporal_selection = temporal_selection.copy()
+            temporal_selection["temporal_strategy_configured"] = temporal_cfg
+            temporal_selection["temporal_strategy_effective"] = temporal_effective
+            temporal_selection["temporal_strategy_selection_source"] = temporal_source
+            temporal_selection.to_csv(
+                os.path.join(metrics_dir, "temporal_strategy_selection_val.csv"),
+                index=False,
+            )
+            logger.info(
+                "Selecao temporal por validacao exportada: temporal_strategy_selection_val.csv"
+            )
     else:
         logger.warning(
             "Split de treino/validacao nao disponivel para selecao de configuracao. "
@@ -1218,15 +1042,19 @@ def run_experiment(
     _run_file_handler.setLevel(logging.INFO)
     _run_file_handler.setFormatter(
         logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "%(asctime)s - %(name)s - %(levelname)s - [run_id=%(run_id)s] - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
+    ensure_run_id_filter(_run_file_handler)
     sspdf_logger.addHandler(_run_file_handler)
 
     _console_handler = logging.StreamHandler()
     _console_handler.setLevel(logging.INFO)
-    _console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+    _console_handler.setFormatter(
+        logging.Formatter("%(levelname)s - [run_id=%(run_id)s] - %(message)s")
+    )
+    ensure_run_id_filter(_console_handler)
     sspdf_logger.addHandler(_console_handler)
 
     sspdf_logger.setLevel(logging.INFO)
@@ -1256,7 +1084,17 @@ def run_experiment(
     report_error = None
     operational_percentile = 95
     configured_percentiles = [95]
+    temporal_strategy_configured = "all"
+    temporal_strategy_effective = "all"
+    temporal_strategy_selection_source = "legacy_all_no_single_selection"
+    temporal_status = "not_attempted"
+    temporal_error = None
+    temporal_degraded_mode = False
+    temporal_failed = False
+    degraded_mode = False
+    temporal_selection_audit_df = pd.DataFrame()
     run_started_at = datetime.datetime.now().isoformat()
+    run_log_token = bind_run_id(run_id)
     git_info = {
         "commit_hash": "unknown",
         "commit_short": "unknown",
@@ -1272,14 +1110,29 @@ def run_experiment(
         current_stage = "CONFIGURACAO"
         with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
+        config = validate_training_config(config)
 
         global_seed = config.get("random_state", seed)
         operational_percentile, configured_percentiles = _resolve_operational_percentile_config(
             config
         )
+        temporal_strategy_configured = normalize_temporal_strategy(
+            config.get("parametros", {})
+            .get("temporal", {})
+            .get("temporal_strategy", "all")
+        )
+        temporal_strategy_effective = temporal_strategy_configured
+        temporal_strategy_selection_source = (
+            "explicit_config" if temporal_strategy_configured != "all"
+            else "legacy_all_no_single_selection"
+        )
         logger.info(
             f"Percentil operacional efetivo: p{operational_percentile} "
             f"| percentis_teste={configured_percentiles}"
+        )
+        logger.info(
+            "Politica temporal configurada: temporal_strategy=%s",
+            temporal_strategy_configured,
         )
         report_required = bool(
             config.get("configuracoes_gerais", {}).get("report_required", True)
@@ -1338,6 +1191,7 @@ def run_experiment(
                     "temporal_window_size": temp_cfg.get("window_size", 3),
                     "temporal_batch_size": temp_cfg.get("batch_size", 64),
                     "temporal_dropout": temp_cfg.get("dropout", 0.2),
+                    "temporal_strategy": temporal_strategy_configured,
                     "percentis_teste": str(configured_percentiles),
                     "operational_percentile": operational_percentile,
                 }
@@ -1383,11 +1237,75 @@ def run_experiment(
                 len(df)
                 * config.get("parametros", {}).get("split_ratios", {}).get("train", 0.6)
             )
-        df, temporal_results, temporal_cols = train_temporal_models(
-            df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
-        )
-        results_summary.extend(temporal_results)
-        score_cols.extend(temporal_cols)
+        temporal_status = "running"
+        try:
+            df, temporal_results, temporal_cols = train_temporal_models(
+                df, features_dict, config, iso_masks, hbos_masks, train_end, models_dir, epochs
+            )
+            results_summary.extend(temporal_results)
+            score_cols.extend(temporal_cols)
+            temporal_status = "success"
+        except Exception as temporal_exc:
+            temporal_degraded_mode = True
+            temporal_failed = True
+            degraded_mode = True
+            if isinstance(temporal_exc, MemoryError):
+                temporal_error = f"MemoryError: {temporal_exc}"
+            elif _is_tf_resource_exhausted_error(temporal_exc):
+                temporal_error = f"ResourceExhaustedError: {temporal_exc}"
+            else:
+                temporal_error = f"{type(temporal_exc).__name__}: {temporal_exc}"
+            temporal_status = "failed"
+            logger.exception(
+                "Falha na etapa temporal (%s). Continuando em modo degradado "
+                "tabular-only (ISO/HBOS).",
+                temporal_error,
+            )
+
+        stats["temporal_status"] = temporal_status
+        stats["temporal_error"] = temporal_error
+        stats["temporal_degraded_mode"] = temporal_degraded_mode
+        stats["temporal_failed"] = temporal_failed
+        stats["degraded_mode"] = degraded_mode
+        stats["temporal_strategy_configured"] = temporal_strategy_configured
+
+        # Auditoria de estrategia temporal deve usar scores completos pre-filtragem.
+        if (
+            isinstance(df_train, pd.DataFrame)
+            and isinstance(df_val, pd.DataFrame)
+            and len(df_train) > 0
+            and len(df_val) > 0
+        ):
+            df_train_scored_pre_filter = df.loc[df_train.index]
+            df_val_scored_pre_filter = df.loc[df_val.index]
+            temporal_selection_audit_df = compute_temporal_strategy_validation(
+                df_train=df_train_scored_pre_filter,
+                df_val=df_val_scored_pre_filter,
+                score_cols=[c for c in score_cols if c.startswith("Temporal_")],
+                percentile=operational_percentile,
+            )
+
+        if temporal_degraded_mode:
+            temporal_strategy_effective = "tabular_only"
+            temporal_strategy_selection_source = (
+                "temporal_stage_failed_degraded_tabular_only"
+            )
+        else:
+            if temporal_strategy_configured != "all":
+                df, results_summary, score_cols = _apply_temporal_strategy_policy(
+                    df=df,
+                    results_summary=results_summary,
+                    score_cols=score_cols,
+                    temporal_strategy=temporal_strategy_configured,
+                    models_dir=models_dir,
+                )
+                temporal_strategy_effective = temporal_strategy_configured
+                temporal_strategy_selection_source = "explicit_config"
+            else:
+                temporal_strategy_effective = "all"
+                temporal_strategy_selection_source = "legacy_all_no_single_selection"
+        stats["temporal_strategy_effective"] = temporal_strategy_effective
+        stats["temporal_strategy_selection_source"] = temporal_strategy_selection_source
 
         current_stage = "ETAPA 5: EXPORTACAO DE RESULTADOS"
         logger.info("=" * 80)
@@ -1407,6 +1325,7 @@ def run_experiment(
             git_info=git_info,
             model_version=model_version,
             operational_percentile=operational_percentile,
+            temporal_selection_audit_df=temporal_selection_audit_df,
         )
         report_required = bool(export_meta.get("report_required", report_required))
         report_status = export_meta.get("report_status", "not_attempted")
@@ -1498,6 +1417,14 @@ def run_experiment(
             "status": run_status,
             "failed_stage": failed_stage,
             "error_message": error_message,
+            "temporal_status": temporal_status,
+            "temporal_error": temporal_error,
+            "temporal_failed": temporal_failed,
+            "temporal_degraded_mode": temporal_degraded_mode,
+            "degraded_mode": degraded_mode,
+            "temporal_strategy_configured": temporal_strategy_configured,
+            "temporal_strategy_effective": temporal_strategy_effective,
+            "temporal_strategy_selection_source": temporal_strategy_selection_source,
             "report_required": report_required,
             "report_status": report_status,
             "report_error": report_error,
@@ -1510,6 +1437,9 @@ def run_experiment(
                 "iso_config": config.get("parametros", {}).get("isolation_forest", {}),
                 "hbos_config": config.get("parametros", {}).get("hbos", {}),
                 "temporal_config": config.get("parametros", {}).get("temporal", {}),
+                "temporal_strategy_configured": temporal_strategy_configured,
+                "temporal_strategy_effective": temporal_strategy_effective,
+                "temporal_strategy_selection_source": temporal_strategy_selection_source,
             },
             "dataset_profile": {
                 "total_records": len(df) if isinstance(df, pd.DataFrame) else "N/A",
@@ -1575,6 +1505,7 @@ def run_experiment(
         else:
             end_run(status="FINISHED")
             logger.info("EXPERIMENTO FINALIZADO!")
+        unbind_run_id(run_log_token)
 
     if captured_exception is not None:
         raise captured_exception

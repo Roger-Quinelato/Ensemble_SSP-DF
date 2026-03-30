@@ -19,6 +19,31 @@ def _get_keras():
     return tf.keras
 
 
+def _iter_exception_chain(exc):
+    """Itera excecao principal e encadeamentos (__cause__/__context__)."""
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_resource_exhausted_error(exc):
+    """
+    Detecta ResourceExhaustedError de TensorFlow sem import global no modulo.
+    """
+    for candidate in _iter_exception_chain(exc):
+        cls = candidate.__class__
+        class_name = cls.__name__
+        class_module = (cls.__module__ or "").lower()
+        if class_name == "ResourceExhaustedError":
+            return True
+        if "resourceexhausted" in class_name.lower() and "tensorflow" in class_module:
+            return True
+    return False
+
+
 class TemporalAutoencoder:
     """
     Pipeline unificado para deteccao de anomalias com Autoencoder Temporal.
@@ -277,14 +302,29 @@ class TemporalAutoencoder:
         logger.info(
             f"   -> Treinando {strategy_name} ({self.arch_type.upper()}) com {len(x_train)} sequencias..."
         )
-        self.model.fit(
-            x_train,
-            x_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=[es],
-            verbose=0,
-        )
+        try:
+            self.model.fit(
+                x_train,
+                x_train,
+                epochs=epochs,
+                batch_size=batch_size,
+                callbacks=[es],
+                verbose=0,
+            )
+        except Exception as exc:
+            if isinstance(exc, MemoryError) or _is_resource_exhausted_error(exc):
+                logger.exception(
+                    "OOM no treino temporal. strategy=%s | n_sequences=%d | "
+                    "window_size=%d | n_features=%d | batch_size=%d",
+                    strategy_name,
+                    len(x_train),
+                    self.window_size,
+                    n_features,
+                    batch_size,
+                )
+                self.model = None
+                return None, None, None
+            raise
 
         x_pred = self.model.predict(x_seq_all, verbose=0)
         mse_sequences = np.mean(np.power(x_seq_all - x_pred, 2), axis=(1, 2))

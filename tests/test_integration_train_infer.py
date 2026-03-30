@@ -12,6 +12,9 @@ import warnings
 
 import pytest
 
+
+pytestmark = [pytest.mark.integration]
+
 # =============================================================================
 # TESTE 1: Thresholds serializados existem e sao validos
 # =============================================================================

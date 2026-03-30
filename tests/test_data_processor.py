@@ -39,6 +39,7 @@ def _ensure_min_records(input_path, tmp_path, min_records=100):
     return str(expanded_path)
 
 
+@pytest.mark.integration
 def test_load_and_standardize(tmp_path):
     with open('config_mapeamento.yaml', 'r') as f:
         config = yaml.safe_load(f)
@@ -51,6 +52,8 @@ def test_load_and_standardize(tmp_path):
     assert 'placa' in df.columns
     assert 'timestamp' in df.columns
 
+
+@pytest.mark.integration
 def test_feature_engineering(tmp_path):
     with open('config_mapeamento.yaml', 'r') as f:
         config = yaml.safe_load(f)
@@ -63,6 +66,7 @@ def test_feature_engineering(tmp_path):
     assert 'hora_sin' in features
 
 
+@pytest.mark.hermetic
 def test_load_and_standardize_rejects_unsupported_extension(tmp_path):
     with open('config_mapeamento.yaml', 'r') as f:
         config = yaml.safe_load(f)
@@ -75,6 +79,7 @@ def test_load_and_standardize_rejects_unsupported_extension(tmp_path):
         proc.load_and_standardize(str(bad_input))
 
 
+@pytest.mark.hermetic
 def test_load_and_standardize_rejects_parent_ref_path():
     with open('config_mapeamento.yaml', 'r') as f:
         config = yaml.safe_load(f)
@@ -82,3 +87,57 @@ def test_load_and_standardize_rejects_parent_ref_path():
 
     with pytest.raises(ValueError, match="path traversal relativo"):
         proc.load_and_standardize("..\\fora\\dados.csv")
+
+
+@pytest.mark.hermetic
+def test_load_and_standardize_csv_parquet_equivalence(tmp_path):
+    config = {
+        "mapeamento_colunas": {
+            "placa": "placa",
+            "timestamp": "timestamp",
+            "latitude": "latitude",
+            "longitude": "longitude",
+            "RA": "regiao_adm",
+        }
+    }
+
+    df_source = pd.DataFrame(
+        {
+            "placa": ["ABC1234", "DEF5678", "GHI9012"],
+            "timestamp": pd.to_datetime(
+                ["2024-01-01 08:00:00", "2024-01-01 08:05:00", "2024-01-01 08:10:00"]
+            ),
+            "latitude": [-15.80, -15.81, -15.82],
+            "longitude": [-47.90, -47.91, -47.92],
+            "regiao_adm": ["Plano Piloto", "Ceilandia", "Taguatinga"],
+        }
+    )
+
+    csv_path = tmp_path / "input.csv"
+    parquet_path = tmp_path / "input.parquet"
+    df_source.to_csv(csv_path, index=False)
+    df_source.to_parquet(parquet_path, index=False)
+
+    proc_csv = DataProcessor(config)
+    proc_parquet = DataProcessor(config)
+    df_csv = proc_csv.load_and_standardize(str(csv_path))
+    df_parquet = proc_parquet.load_and_standardize(str(parquet_path))
+
+    critical_cols = {"placa", "timestamp", "latitude", "longitude"}
+    assert critical_cols.issubset(df_csv.columns)
+    assert critical_cols.issubset(df_parquet.columns)
+    assert len(df_csv) == len(df_parquet) == len(df_source)
+
+    assert pd.api.types.is_datetime64_any_dtype(df_csv["timestamp"])
+    assert pd.api.types.is_datetime64_any_dtype(df_parquet["timestamp"])
+    assert pd.api.types.is_float_dtype(df_csv["latitude"])
+    assert pd.api.types.is_float_dtype(df_parquet["latitude"])
+    assert pd.api.types.is_float_dtype(df_csv["longitude"])
+    assert pd.api.types.is_float_dtype(df_parquet["longitude"])
+
+    cols = ["placa", "timestamp", "latitude", "longitude"]
+    pd.testing.assert_frame_equal(
+        df_csv[cols].reset_index(drop=True),
+        df_parquet[cols].reset_index(drop=True),
+        check_dtype=False,
+    )

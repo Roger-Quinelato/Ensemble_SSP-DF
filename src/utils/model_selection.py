@@ -12,6 +12,32 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("sspdf")
+TEMPORAL_STRATEGY_ALLOWED = ("all", "union", "inter", "baseline")
+
+
+def normalize_temporal_strategy(value):
+    """
+    Normaliza estrategia temporal para governanca operacional.
+    """
+    if value is None:
+        return "all"
+    strategy = str(value).strip().lower()
+    if strategy not in TEMPORAL_STRATEGY_ALLOWED:
+        raise ValueError(
+            "temporal_strategy invalida. Use uma das opcoes: "
+            f"{list(TEMPORAL_STRATEGY_ALLOWED)}"
+        )
+    return strategy
+
+
+def _temporal_strategy_from_score_col(score_col):
+    if score_col.startswith("Temporal_Union_"):
+        return "union"
+    if score_col.startswith("Temporal_Inter_"):
+        return "inter"
+    if score_col.startswith("Temporal_Baseline"):
+        return "baseline"
+    return None
 
 
 def compute_val_stability_metrics(df_train, df_val, score_cols, percentile=95):
@@ -109,3 +135,47 @@ def compute_val_stability_metrics(df_train, df_val, score_cols, percentile=95):
     logger.info("=" * 80)
 
     return df_selection
+
+
+def compute_temporal_strategy_validation(df_train, df_val, score_cols, percentile=95):
+    """
+    Agrega metricas de estabilidade por estrategia temporal (Union/Inter/Baseline).
+
+    Usa apenas treino/validacao para manter ausencia de leakage com teste.
+    """
+    temporal_score_cols = [c for c in score_cols if c.startswith("Temporal_")]
+    if not temporal_score_cols:
+        return pd.DataFrame()
+
+    detail = compute_val_stability_metrics(
+        df_train=df_train,
+        df_val=df_val,
+        score_cols=temporal_score_cols,
+        percentile=percentile,
+    )
+    if detail.empty:
+        return pd.DataFrame()
+
+    detail = detail.copy()
+    detail["temporal_strategy"] = detail["score_col"].apply(_temporal_strategy_from_score_col)
+    detail = detail[detail["temporal_strategy"].isin({"union", "inter", "baseline"})]
+    if detail.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for strategy, group in detail.groupby("temporal_strategy", sort=False):
+        group_sorted = group.sort_values("stability_delta_pct")
+        best = group_sorted.iloc[0]
+        rows.append(
+            {
+                "temporal_strategy": strategy,
+                "n_configs": int(len(group_sorted)),
+                "best_config": best["config"],
+                "best_stability_delta_pct": float(best["stability_delta_pct"]),
+                "mean_stability_delta_pct": float(group_sorted["stability_delta_pct"].mean()),
+            }
+        )
+
+    out = pd.DataFrame(rows).sort_values("mean_stability_delta_pct").reset_index(drop=True)
+    out["rank_temporal_strategy"] = range(1, len(out) + 1)
+    return out

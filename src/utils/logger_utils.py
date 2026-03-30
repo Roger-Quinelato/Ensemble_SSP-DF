@@ -3,11 +3,14 @@ import getpass
 import logging
 import os
 import time
+from contextvars import ContextVar
 
 
 # Diretorio de logs: configuravel via variavel de ambiente ou default
 _LOG_DIR = os.environ.get("SSPDF_LOG_DIR", "outputs/logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "execution.log")
+_RUN_ID_CONTEXT = ContextVar("sspdf_run_id", default="-")
+_RUN_ID_FILTER_NAME = "sspdf_run_id_filter"
 
 
 def _default_log_file(run_id=None):
@@ -31,6 +34,35 @@ def _clear_handlers(logger):
             handler.close()
         except Exception:
             pass
+
+
+class RunIdFilter(logging.Filter):
+    """Injeta run_id estruturado em cada LogRecord."""
+
+    def filter(self, record):
+        record.run_id = _RUN_ID_CONTEXT.get("-")
+        return True
+
+
+def bind_run_id(run_id):
+    """Define run_id no contexto atual de logs e retorna token para restore."""
+    normalized = "-" if run_id is None else str(run_id)
+    return _RUN_ID_CONTEXT.set(normalized)
+
+
+def unbind_run_id(token):
+    """Restaura contexto anterior de run_id."""
+    _RUN_ID_CONTEXT.reset(token)
+
+
+def ensure_run_id_filter(handler):
+    """Garante filtro de run_id no handler sem duplicacao."""
+    for current in handler.filters:
+        if getattr(current, "name", "") == _RUN_ID_FILTER_NAME:
+            return handler
+    filter_obj = RunIdFilter(name=_RUN_ID_FILTER_NAME)
+    handler.addFilter(filter_obj)
+    return handler
 
 
 def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
@@ -63,7 +95,7 @@ def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
 
     logger.setLevel(level)
     formatter_txt = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "%(asctime)s - %(name)s - %(levelname)s - [run_id=%(run_id)s] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -73,14 +105,18 @@ def setup_logger(name="sspdf", log_file=None, level=logging.INFO, run_id=None):
         file_handler = logging.FileHandler(path, encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter_txt)
+        ensure_run_id_filter(file_handler)
         logger.addHandler(file_handler)
 
     # Handler: Console (stdout)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
-    console_formatter = logging.Formatter("%(levelname)s - %(message)s")
+    console_formatter = logging.Formatter("%(levelname)s - [run_id=%(run_id)s] - %(message)s")
     console_handler.setFormatter(console_formatter)
+    ensure_run_id_filter(console_handler)
     logger.addHandler(console_handler)
+
+    bind_run_id(run_id)
 
     return logger
 
